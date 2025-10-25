@@ -5,6 +5,7 @@
 import os
 from functools import lru_cache
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 from streamlit_timeline import st_timeline
@@ -22,7 +23,11 @@ from db import (
 )
 from crawler import fetch_bptc_t
 from validate import snap_to_interval, validate_temporal_overlaps, validate_spatial_gap
-from plot_gantt import render_berth_gantt, get_demo_df   # ✅ G형 시각화 함수 가져오기s
+from plot_gantt import (
+    render_berth_gantt,
+    get_demo_df,
+    normalize_berth_label,  # ✅ G형 시각화 함수 가져오기s
+)
 
 # -----------------------------------------------------------
 # 기본 설정
@@ -156,6 +161,29 @@ def enrich_with_loa(source_df: pd.DataFrame) -> pd.DataFrame:
     work["loa_m"] = work["loa_m"].fillna(55.0)
     return work
 
+
+def normalize_berth_column(df: pd.DataFrame) -> pd.DataFrame:
+    """선석 라벨을 숫자 문자열로 정규화한다."""
+
+    if df is None or df.empty or "berth" not in df.columns:
+        return df
+
+    work = df.copy()
+    work["berth"] = work["berth"].map(normalize_berth_label)
+    return work
+
+
+def build_kst_label(base_label: str) -> str:
+    """버전 레이블에 한국 표준시 타임스탬프를 부여한다."""
+
+    now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
+    timestamp = now_kst.strftime("%Y-%m-%d %H:%M")
+    base = base_label.strip()
+    if base:
+        return f"{base} · {timestamp} (KST)"
+    return f"{timestamp} (KST)"
+
+
 # -----------------------------------------------------------
 # 크롤링 버튼 동작
 # -----------------------------------------------------------
@@ -194,7 +222,13 @@ if btn_crawl:
             st.stop()
 
         # DB 저장
-        vid = create_version_with_assignments(session, df_t, source="crawler:bptc", label="BPTC T 크롤링")
+        df_t = normalize_berth_column(df_t)
+        vid = create_version_with_assignments(
+            session,
+            df_t,
+            source="crawler:bptc",
+            label=build_kst_label("BPTC T 크롤링"),
+        )
         st.session_state["last_df"] = df_t  # ✅ G 시각화용
         st.success(f"✅ 크롤링 완료 — 새 버전 {vid[:8]} 생성 ({len(df_t)}건)")
         st.rerun()
@@ -263,6 +297,8 @@ if candidate_df is None or len(candidate_df) == 0:
         )
 else:
     g_source_df = enrich_with_loa(candidate_df)
+    g_source_df = normalize_berth_column(g_source_df)
+
     st.session_state["last_df"] = g_source_df.copy()
 
     tabs = st.tabs(["신선대 (1~5선석)", "감만 (6~9선석)"])
@@ -288,6 +324,7 @@ else:
         if evt0:
             latest_event = evt0
             latest_df = enrich_with_loa(latest_df)
+            latest_df = normalize_berth_column(latest_df)
 
     with tabs[1]:
         latest_df, evt1 = render_berth_gantt(
@@ -303,6 +340,7 @@ else:
         if evt1:
             latest_event = evt1
             latest_df = enrich_with_loa(latest_df)
+            latest_df = normalize_berth_column(latest_df)
 
     st.session_state["last_df"] = latest_df.copy()
 
@@ -311,11 +349,12 @@ else:
     if g_editable and latest_event:
         st.info("드래그 변경이 감지되었습니다. 아래 버튼으로 새 버전으로 저장할 수 있습니다.")
         if st.button("💾 Gantt 편집 내용 저장(새 버전)"):
+            to_save = normalize_berth_column(latest_df)
             vid = create_version_with_assignments(
                 session,
-                latest_df,
+                to_save,
                 source="user-edit:gantt",
-                label=f"Gantt편집({snap_choice})",
+                label=build_kst_label(f"Gantt편집({snap_choice})"),
             )
             st.success(f"저장 완료 — 새 버전 {vid[:8]}")
             st.rerun()
@@ -325,8 +364,8 @@ else:
 # 버전 불러오기 (A/B 비교용)
 # -----------------------------------------------------------
 if versions:
-    df_left = load_assignments_df(session, versions[idx_a]["id"])
-    df_right = load_assignments_df(session, versions[idx_b]["id"])
+    df_left = normalize_berth_column(load_assignments_df(session, versions[idx_a]["id"]))
+    df_right = normalize_berth_column(load_assignments_df(session, versions[idx_b]["id"]))
 else:
     st.info("버전을 먼저 생성하세요 (크롤링 또는 CSV 업로드).")
     df_left = pd.DataFrame(columns=["vessel", "berth", "eta", "etd", "loa_m", "start_meter"])
@@ -368,6 +407,7 @@ def ensure_gantt_columns(df: pd.DataFrame) -> pd.DataFrame:
         return df.reindex(columns=cols)
 
     work = df.copy()
+    work = normalize_berth_column(work)
     for col in ["start_tag", "end_tag", "badge", "status"]:
         if col not in work.columns:
             work[col] = None
@@ -443,7 +483,13 @@ with colA:
         st.session_state["working_df"] = st.session_state["history"].pop()
 
     if do_save:
-        vid = create_version_with_assignments(session, st.session_state["working_df"], source="user-edit", label=f"수정본({snap_choice})")
+        to_save = normalize_berth_column(st.session_state["working_df"])
+        vid = create_version_with_assignments(
+            session,
+            to_save,
+            source="user-edit",
+            label=build_kst_label(f"수정본({snap_choice})"),
+        )
         st.success(f"💾 저장 완료 — 새 버전 {vid[:8]}")
         st.session_state["history"].clear()
         st.rerun()

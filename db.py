@@ -53,6 +53,30 @@ class Assignment(Base):
     vessel = relationship("Vessel")
     berth = relationship("Berth")
 
+
+def _normalize_berth_code(value) -> str:
+    if value is None:
+        return ""
+
+    text = str(value).strip()
+    if not text:
+        return ""
+
+    if "(" in text and ")" in text:
+        start = text.find("(") + 1
+        end = text.find(")", start)
+        if end > start:
+            inside = "".join(ch for ch in text[start:end] if ch.isdigit())
+            if inside:
+                return str(int(inside))
+
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if digits:
+        return str(int(digits))
+
+    return text
+
+
 def init_db():
     Base.metadata.create_all(engine)
     return engine, Base
@@ -89,11 +113,24 @@ def _get_or_create_vessel(session, name: str) -> Vessel:
     return v
 
 def _get_berth(session, code: str) -> Berth:
-    b = session.query(Berth).filter(Berth.code==code).one_or_none()
-    if b is None:
-        b = Berth(code=code, meter_start=0, meter_end=400)
-        session.add(b)
-        session.commit()
+    normalized = _normalize_berth_code(code)
+    raw_code = str(code).strip() if code is not None else ""
+
+    candidates = []
+    if normalized:
+        candidates.append(normalized)
+    if raw_code and raw_code not in candidates:
+        candidates.append(raw_code)
+
+    for candidate in candidates:
+        b = session.query(Berth).filter(Berth.code == candidate).one_or_none()
+        if b is not None:
+            return b
+
+    create_code = normalized or raw_code or ""
+    b = Berth(code=create_code, meter_start=0, meter_end=400)
+    session.add(b)
+    session.commit()
     return b
 
 
@@ -154,7 +191,7 @@ def create_version_with_assignments(session, df: pd.DataFrame, source="user-edit
             vessel.loa_m = float(r["loa_m"])
             session.add(vessel)
 
-        berth = _get_berth(session, str(r["berth"]))
+        berth = _get_berth(session, r["berth"])
         a = Assignment(
             id=str(uuid.uuid4()),
             version_id=vid,
