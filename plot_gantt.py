@@ -91,16 +91,28 @@ def _ensure_timeline_css(unique_key: str) -> None:
     st.session_state[css_key] = True
 
 
-def _normalize_berth_label(value) -> str:
-    """문자열에서 숫자만 추출해 선석 라벨을 정규화."""
+def normalize_berth_label(value) -> str:
+    """선석 라벨을 숫자 위주로 정규화한다 (예: "1(9)" → "9")."""
 
     if pd.isna(value):
         return ""
 
     text = str(value).strip()
+    if not text:
+        return ""
+
+    if "(" in text and ")" in text:
+        start = text.find("(") + 1
+        end = text.find(")", start)
+        if end > start:
+            inside = "".join(ch for ch in text[start:end] if ch.isdigit())
+            if inside:
+                return str(int(inside))
+
     digits = "".join(ch for ch in text if ch.isdigit())
     if digits:
-        return digits
+        return str(int(digits))
+
     return text
 
 
@@ -130,7 +142,7 @@ def _prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     work["etd"] = pd.to_datetime(work["etd"], errors="coerce")
     work = work.dropna(subset=["eta", "etd", "vessel", "berth"])
 
-    work["berth"] = work["berth"].map(_normalize_berth_label)
+    work["berth"] = work["berth"].map(normalize_berth_label)
     work = work.reset_index(drop=True)
     return work
 
@@ -141,16 +153,13 @@ def _build_groups(berths: Iterable[str]) -> List[Dict[str, str]]:
 
 
 def _compute_height(row: pd.Series) -> float:
-    loa_val = row.get("loa_m")
-    if pd.isna(loa_val):
-        return 36.0
+    """모든 선석 블록의 높이를 고정된 범위 내 값으로 유지한다."""
 
-    try:
-        loa_float = float(loa_val)
-    except (TypeError, ValueError):
-        return 36.0
+    DEFAULT_HEIGHT = 40.0
+    MIN_HEIGHT = 20.0
+    MAX_HEIGHT = 80.0
 
-    return max(20.0, min(80.0, (loa_float / 10.0) * 20.0))
+    return max(MIN_HEIGHT, min(MAX_HEIGHT, DEFAULT_HEIGHT))
 
 
 def _build_item(row: pd.Series, idx: int, editable: bool) -> Dict:
@@ -258,6 +267,7 @@ def render_berth_gantt(
     snap_choice: str = "1h",
     height: str = "780px",
     key: str = "berth_gantt",
+    allowed_berths: Iterable[str] | None = None,
 ) -> Tuple[pd.DataFrame, Dict | None]:
     """Streamlit에서 선석 Gantt 보드를 렌더링하고 이벤트를 반영한 DataFrame을 반환."""
 
@@ -274,9 +284,22 @@ def render_berth_gantt(
     mask = (df_prepared["etd"] > view_start) & (df_prepared["eta"] < view_end)
     view_df = df_prepared.loc[mask].copy()
 
+    if allowed_berths is not None:
+        allowed_set = {
+            normalize_berth_label(b)
+            for b in allowed_berths
+            if normalize_berth_label(b)
+        }
+        if allowed_set:
+            view_df = view_df[
+                view_df["berth"].map(lambda x: normalize_berth_label(x) in allowed_set)
+            ].copy()
+        else:
+            view_df = view_df.iloc[0:0]
+
     if view_df.empty:
         st.info("선택한 기간에 해당하는 일정이 없습니다.")
-        return view_df, None
+        return df_prepared, None
 
     groups = _build_groups(view_df["berth"].dropna())
     items = _build_items(view_df, editable)
@@ -303,7 +326,7 @@ def render_berth_gantt(
                 view_df.loc[row_idx, "etd"] = snapped
                 df_prepared.loc[row_idx, "etd"] = snapped
             if "group" in event and event["group"] is not None:
-                normalized = _normalize_berth_label(event["group"])
+                normalized = normalize_berth_label(event["group"])
                 view_df.loc[row_idx, "berth"] = normalized
                 df_prepared.loc[row_idx, "berth"] = normalized
 
