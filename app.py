@@ -75,6 +75,13 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 🔹 설정")
     snap_choice = st.radio("시간 스냅 단위", ["1h", "30m", "15m"], index=0, horizontal=True)
+    load_orientation_choice = st.radio(
+        "적하/양하 배치 방향",
+        ["가로", "세로"],
+        index=0,
+        horizontal=True,
+    )
+    load_orientation = "horizontal" if load_orientation_choice == "가로" else "vertical"
     min_gap_m = st.number_input("동시 계류 최소 이격(m)", min_value=0, value=30, step=5)
 
     st.markdown("---")
@@ -284,6 +291,7 @@ if candidate_df is None or len(candidate_df) == 0:
             height="720px",
             key="gantt_demo_sinseondae",
             allowed_berths=["1", "2", "3", "4", "5"],
+            load_discharge_orientation=load_orientation,
         )
     with tabs[1]:
         render_berth_gantt(
@@ -296,6 +304,7 @@ if candidate_df is None or len(candidate_df) == 0:
             key="gantt_demo_gamman",
             allowed_berths=["9", "8", "7", "6"],
             group_label_map=gamman_labels,
+            load_discharge_orientation=load_orientation,
         )
 else:
     g_source_df = enrich_with_loa(candidate_df)
@@ -325,6 +334,7 @@ else:
             height="780px",
             key="gantt_main_sinseondae",
             allowed_berths=berth_groups["sinseondae"],
+            load_discharge_orientation=load_orientation,
         )
         if evt0:
             latest_event = evt0
@@ -342,6 +352,7 @@ else:
             key="gantt_main_gamman",
             allowed_berths=berth_groups["gamman"],
             group_label_map=berth_labels.get("gamman"),
+            load_discharge_orientation=load_orientation,
         )
         if evt1:
             latest_event = evt1
@@ -409,12 +420,21 @@ def ensure_gantt_columns(df: pd.DataFrame) -> pd.DataFrame:
             "end_tag",
             "badge",
             "status",
+            "load_discharge",
+            "load_orientation",
         ]
         return df.reindex(columns=cols)
 
     work = df.copy()
     work = normalize_berth_column(work)
-    for col in ["start_tag", "end_tag", "badge", "status"]:
+    for col in [
+        "start_tag",
+        "end_tag",
+        "badge",
+        "status",
+        "load_discharge",
+        "load_orientation",
+    ]:
         if col not in work.columns:
             work[col] = None
 
@@ -453,6 +473,7 @@ with colA:
         snap_choice=snap_choice,
         height="560px",
         key="timeline_left",
+        load_discharge_orientation=load_orientation,
     )
 
     if timeline_eventA:
@@ -510,6 +531,7 @@ with colB:
         snap_choice=snap_choice,
         height="560px",
         key="timeline_right",
+        load_discharge_orientation=load_orientation,
     )
 
 st.caption("🔸 외부(BPTC) 시스템에는 쓰기 요청을 하지 않으며, 사내 DB 사본만 관리합니다.")
