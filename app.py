@@ -3,14 +3,22 @@
 # License: MIT
 
 import os
+from functools import lru_cache
 from datetime import datetime, timedelta
 import pandas as pd
 import streamlit as st
 from streamlit_timeline import st_timeline
 
 from db import (
-    init_db, SessionLocal, upsert_reference_data,
-    create_version_with_assignments, list_versions, load_assignments_df
+    init_db,
+    SessionLocal,
+    upsert_reference_data,
+    create_version_with_assignments,
+    list_versions,
+    load_assignments_df,
+    delete_all_versions,
+    get_vessel_loa_map,
+    set_vessels_loa,
 )
 from crawler import fetch_bptc_t
 from validate import snap_to_interval, validate_temporal_overlaps, validate_spatial_gap
@@ -77,6 +85,77 @@ if "history" not in st.session_state:
 if "working_df" not in st.session_state:
     st.session_state["working_df"] = pd.DataFrame()
 
+
+@lru_cache(maxsize=1)
+def load_reference_loa_map() -> dict[str, float]:
+    """CSV 기준 LOA 정보를 메모리에 캐싱한다."""
+
+    path = os.path.join(os.path.dirname(__file__), "data", "vessels_loa.csv")
+    if not os.path.exists(path):
+        return {}
+
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return {}
+
+    mapping: dict[str, float] = {}
+    for _, row in df.iterrows():
+        name = str(row.get("name", "")).strip()
+        if not name:
+            continue
+        try:
+            loa_val = float(row.get("loa_m"))
+        except (TypeError, ValueError):
+            continue
+        mapping[name.upper()] = loa_val
+    return mapping
+
+
+def enrich_with_loa(source_df: pd.DataFrame) -> pd.DataFrame:
+    """LOA 결측값을 DB/CSV 정보를 활용해 보강한다."""
+
+    if source_df is None or source_df.empty:
+        return source_df
+
+    work = source_df.copy()
+    if "loa_m" not in work.columns:
+        work["loa_m"] = pd.NA
+
+    missing_mask = work["loa_m"].isna()
+    if not missing_mask.any():
+        return work
+
+    vessels = work.loc[missing_mask, "vessel"].dropna().astype(str)
+    db_map = get_vessel_loa_map(session, vessels.tolist())
+    db_case_map = {str(k).strip().casefold(): v for k, v in db_map.items()}
+    csv_map = load_reference_loa_map()
+
+    updates_for_db: dict[str, float] = {}
+
+    for idx in work.index[missing_mask]:
+        name = str(work.at[idx, "vessel"]).strip()
+        if not name:
+            continue
+
+        loa_val = db_map.get(name)
+        if loa_val is None:
+            loa_val = db_case_map.get(name.casefold())
+        if loa_val is None:
+            loa_val = csv_map.get(name.upper())
+            if loa_val is not None:
+                updates_for_db[name] = loa_val
+
+        if loa_val is not None:
+            work.at[idx, "loa_m"] = loa_val
+
+    if updates_for_db:
+        set_vessels_loa(session, updates_for_db)
+
+    # 최종적으로도 값이 없으면 기본값(55m)로 채워 가독성 확보
+    work["loa_m"] = work["loa_m"].fillna(55.0)
+    return work
+
 # -----------------------------------------------------------
 # 크롤링 버튼 동작
 # -----------------------------------------------------------
@@ -127,7 +206,21 @@ if btn_crawl:
 st.markdown("---")
 st.header("📊 선석배정 현황(G) 시각화")
 
-colx, coly, colz = st.columns([1,1,1])
+with st.expander("데이터 관리 (DB)"):
+    st.warning("모든 선석 배정 버전과 일정 데이터가 삭제됩니다.")
+    confirm_token = st.text_input("삭제하려면 DELETE 입력", key="gantt_delete_confirm")
+    if st.button("🗑️ DB 선석배정 데이터 전체 삭제", type="secondary", disabled=confirm_token.strip().upper() != "DELETE"):
+        deleted = delete_all_versions(session)
+        if deleted:
+            st.success(f"총 {deleted}개 버전을 삭제했습니다.")
+        else:
+            st.info("삭제할 버전이 없습니다.")
+        st.session_state.pop("last_df", None)
+        st.session_state.pop("history", None)
+        st.session_state["working_df"] = pd.DataFrame()
+        st.rerun()
+
+colx, coly, colz = st.columns([1, 1, 1])
 with colx:
     g_base = st.date_input("기준일", value=datetime.now().date())
 with coly:
@@ -139,39 +232,91 @@ with colz:
 candidate_df = None
 if "last_df" in st.session_state and not st.session_state["last_df"].empty:
     candidate_df = st.session_state["last_df"]
-elif 'df_left' in locals() and not df_left.empty:
+elif "df_left" in locals() and not df_left.empty:
     candidate_df = df_left
 
 if candidate_df is None or len(candidate_df) == 0:
     st.info("크롤링하거나 버전을 선택하면 Gantt가 표시됩니다. 아래는 데모 데이터입니다.")
     demo_df = get_demo_df(pd.Timestamp(g_base))
-    render_berth_gantt(
-        demo_df,
-        base_date=pd.Timestamp(g_base),
-        days=g_days,
-        editable=False,
-        snap_choice=snap_choice,
-        height="720px",
-        key="gantt_demo",
-    )
+    tabs = st.tabs(["신선대 (1~5선석)", "감만 (6~9선석)"])
+    with tabs[0]:
+        render_berth_gantt(
+            demo_df,
+            base_date=pd.Timestamp(g_base),
+            days=g_days,
+            editable=False,
+            snap_choice=snap_choice,
+            height="720px",
+            key="gantt_demo_sinseondae",
+            allowed_berths=["1", "2", "3", "4", "5"],
+        )
+    with tabs[1]:
+        render_berth_gantt(
+            demo_df,
+            base_date=pd.Timestamp(g_base),
+            days=g_days,
+            editable=False,
+            snap_choice=snap_choice,
+            height="720px",
+            key="gantt_demo_gamman",
+            allowed_berths=["6", "7", "8", "9"],
+        )
 else:
-    vdf, evt = render_berth_gantt(
-        candidate_df,
-        base_date=pd.Timestamp(g_base),
-        days=g_days,
-        editable=g_editable,
-        snap_choice=snap_choice,
-        height="780px",
-        key="gantt_main",
-    )
+    g_source_df = enrich_with_loa(candidate_df)
+    st.session_state["last_df"] = g_source_df.copy()
+
+    tabs = st.tabs(["신선대 (1~5선석)", "감만 (6~9선석)"])
+    berth_groups = {
+        "sinseondae": ["1", "2", "3", "4", "5"],
+        "gamman": ["6", "7", "8", "9"],
+    }
+
+    latest_df = g_source_df
+    latest_event = None
+
+    with tabs[0]:
+        latest_df, evt0 = render_berth_gantt(
+            latest_df,
+            base_date=pd.Timestamp(g_base),
+            days=g_days,
+            editable=g_editable,
+            snap_choice=snap_choice,
+            height="780px",
+            key="gantt_main_sinseondae",
+            allowed_berths=berth_groups["sinseondae"],
+        )
+        if evt0:
+            latest_event = evt0
+            latest_df = enrich_with_loa(latest_df)
+
+    with tabs[1]:
+        latest_df, evt1 = render_berth_gantt(
+            latest_df,
+            base_date=pd.Timestamp(g_base),
+            days=g_days,
+            editable=g_editable,
+            snap_choice=snap_choice,
+            height="780px",
+            key="gantt_main_gamman",
+            allowed_berths=berth_groups["gamman"],
+        )
+        if evt1:
+            latest_event = evt1
+            latest_df = enrich_with_loa(latest_df)
+
+    st.session_state["last_df"] = latest_df.copy()
 
     st.caption("Tip: 마우스로 **좌우 드래그**하면 가로 스크롤, **CTRL+휠**로 확대/축소할 수 있습니다.")
 
-    if g_editable and evt:
-        st.session_state["last_df"] = vdf
+    if g_editable and latest_event:
         st.info("드래그 변경이 감지되었습니다. 아래 버튼으로 새 버전으로 저장할 수 있습니다.")
         if st.button("💾 Gantt 편집 내용 저장(새 버전)"):
-            vid = create_version_with_assignments(session, vdf, source="user-edit:gantt", label=f"Gantt편집({snap_choice})")
+            vid = create_version_with_assignments(
+                session,
+                latest_df,
+                source="user-edit:gantt",
+                label=f"Gantt편집({snap_choice})",
+            )
             st.success(f"저장 완료 — 새 버전 {vid[:8]}")
             st.rerun()
 

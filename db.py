@@ -3,7 +3,7 @@
 import os
 import uuid
 from datetime import datetime
-from typing import List, Dict
+from typing import Dict, Iterable, List
 
 import pandas as pd
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Float, text
@@ -96,6 +96,51 @@ def _get_berth(session, code: str) -> Berth:
         session.commit()
     return b
 
+
+def get_vessel_loa_map(session, vessel_names: Iterable[str]) -> Dict[str, float]:
+    """요청된 선박명에 대한 LOA 정보를 반환한다."""
+
+    names = {str(name).strip() for name in vessel_names if str(name).strip()}
+    if not names:
+        return {}
+
+    rows = (
+        session.query(Vessel.name, Vessel.loa_m)
+        .filter(Vessel.name.in_(names))
+        .all()
+    )
+    return {name: loa for name, loa in rows if loa is not None}
+
+
+def set_vessels_loa(session, mapping: Dict[str, float]) -> int:
+    """선박 LOA 값을 일괄 업데이트하고 변경 건수를 반환한다."""
+
+    changed = 0
+    for raw_name, raw_loa in mapping.items():
+        if raw_loa is None:
+            continue
+        try:
+            loa_val = float(raw_loa)
+        except (TypeError, ValueError):
+            continue
+
+        name = str(raw_name).strip()
+        if not name:
+            continue
+
+        vessel = session.query(Vessel).filter(Vessel.name == name).one_or_none()
+        if vessel is None:
+            vessel = Vessel(name=name, loa_m=loa_val)
+            session.add(vessel)
+            changed += 1
+        elif vessel.loa_m != loa_val:
+            vessel.loa_m = loa_val
+            changed += 1
+
+    if changed:
+        session.commit()
+    return changed
+
 def create_version_with_assignments(session, df: pd.DataFrame, source="user-edit", label=""):
     vid = str(uuid.uuid4())
     ver = ScheduleVersion(id=vid, source=source, label=label)
@@ -149,3 +194,30 @@ def load_assignments_df(session, version_id: str) -> pd.DataFrame:
             "start_meter": a.start_meter,
         })
     return pd.DataFrame(rows)
+
+
+def delete_versions(session, version_ids: Iterable[str] | None = None) -> int:
+    """지정된 버전을 삭제하고 삭제된 개수를 반환한다."""
+
+    query = session.query(ScheduleVersion)
+    if version_ids is not None:
+        ids = {vid for vid in version_ids if vid}
+        if not ids:
+            return 0
+        query = query.filter(ScheduleVersion.id.in_(ids))
+
+    versions = query.all()
+    if not versions:
+        return 0
+
+    count = len(versions)
+    for version in versions:
+        session.delete(version)
+    session.commit()
+    return count
+
+
+def delete_all_versions(session) -> int:
+    """모든 선석 배정 버전을 삭제한다."""
+
+    return delete_versions(session, None)
