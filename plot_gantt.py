@@ -258,6 +258,7 @@ def render_berth_gantt(
     snap_choice: str = "1h",
     height: str = "780px",
     key: str = "berth_gantt",
+    allowed_berths: Iterable[str] | None = None,
 ) -> Tuple[pd.DataFrame, Dict | None]:
     """Streamlit에서 선석 Gantt 보드를 렌더링하고 이벤트를 반영한 DataFrame을 반환."""
 
@@ -274,9 +275,22 @@ def render_berth_gantt(
     mask = (df_prepared["etd"] > view_start) & (df_prepared["eta"] < view_end)
     view_df = df_prepared.loc[mask].copy()
 
+    if allowed_berths is not None:
+        allowed_set = {
+            _normalize_berth_label(b)
+            for b in allowed_berths
+            if _normalize_berth_label(b)
+        }
+        if allowed_set:
+            view_df = view_df[
+                view_df["berth"].map(lambda x: _normalize_berth_label(x) in allowed_set)
+            ].copy()
+        else:
+            view_df = view_df.iloc[0:0]
+
     if view_df.empty:
         st.info("선택한 기간에 해당하는 일정이 없습니다.")
-        return view_df, None
+        return df_prepared, None
 
     groups = _build_groups(view_df["berth"].dropna())
     items = _build_items(view_df, editable)
