@@ -273,6 +273,7 @@ if candidate_df is None or len(candidate_df) == 0:
     st.info("크롤링하거나 버전을 선택하면 Gantt가 표시됩니다. 아래는 데모 데이터입니다.")
     demo_df = get_demo_df(pd.Timestamp(g_base))
     tabs = st.tabs(["신선대 (1~5선석)", "감만 (6~9선석)"])
+    gamman_labels = {"9": "9(1)", "8": "8(2)", "7": "7(3)", "6": "6(4)"}
     with tabs[0]:
         render_berth_gantt(
             demo_df,
@@ -293,7 +294,8 @@ if candidate_df is None or len(candidate_df) == 0:
             snap_choice=snap_choice,
             height="720px",
             key="gantt_demo_gamman",
-            allowed_berths=["6", "7", "8", "9"],
+            allowed_berths=["9", "8", "7", "6"],
+            group_label_map=gamman_labels,
         )
 else:
     g_source_df = enrich_with_loa(candidate_df)
@@ -304,7 +306,10 @@ else:
     tabs = st.tabs(["신선대 (1~5선석)", "감만 (6~9선석)"])
     berth_groups = {
         "sinseondae": ["1", "2", "3", "4", "5"],
-        "gamman": ["6", "7", "8", "9"],
+        "gamman": ["9", "8", "7", "6"],
+    }
+    berth_labels = {
+        "gamman": {"9": "9(1)", "8": "8(2)", "7": "7(3)", "6": "6(4)"},
     }
 
     latest_df = g_source_df
@@ -336,6 +341,7 @@ else:
             height="780px",
             key="gantt_main_gamman",
             allowed_berths=berth_groups["gamman"],
+            group_label_map=berth_labels.get("gamman"),
         )
         if evt1:
             latest_event = evt1

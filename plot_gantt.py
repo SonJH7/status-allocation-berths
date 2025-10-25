@@ -92,7 +92,7 @@ def _ensure_timeline_css(unique_key: str) -> None:
 
 
 def normalize_berth_label(value) -> str:
-    """선석 라벨을 숫자 위주로 정규화한다 (예: "1(9)" → "9")."""
+    """선석 라벨을 숫자 위주로 정규화한다 (예: "9(1)" → "9")."""
 
     if pd.isna(value):
         return ""
@@ -100,6 +100,13 @@ def normalize_berth_label(value) -> str:
     text = str(value).strip()
     if not text:
         return ""
+
+    # 괄호 앞에 실제 선석 번호가 표기된 경우 우선적으로 사용한다.
+    if "(" in text:
+        prefix = text[: text.find("(")]
+        prefix_digits = "".join(ch for ch in prefix if ch.isdigit())
+        if prefix_digits:
+            return str(int(prefix_digits))
 
     if "(" in text and ")" in text:
         start = text.find("(") + 1
@@ -147,9 +154,47 @@ def _prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return work
 
 
-def _build_groups(berths: Iterable[str]) -> List[Dict[str, str]]:
-    ordered = sorted({b for b in berths if b}, key=_berth_sort_key)
-    return [{"id": b, "content": b} for b in ordered]
+def _normalize_berth_list(values: Iterable[str] | None) -> List[str]:
+    normalized: List[str] = []
+    seen = set()
+    if not values:
+        return normalized
+
+    for value in values:
+        norm = normalize_berth_label(value)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        normalized.append(norm)
+
+    return normalized
+
+
+def _build_groups(
+    berths: Iterable[str],
+    order: Iterable[str] | None = None,
+    label_map: Dict[str, str] | None = None,
+) -> List[Dict[str, str]]:
+    label_map = label_map or {}
+
+    if order:
+        normalized_order = _normalize_berth_list(order)
+        return [
+            {"id": b, "content": label_map.get(b, b)}
+            for b in normalized_order
+        ]
+
+    collected: List[str] = []
+    seen = set()
+    for b in berths:
+        norm = normalize_berth_label(b)
+        if not norm or norm in seen:
+            continue
+        collected.append(norm)
+        seen.add(norm)
+
+    ordered = sorted(collected, key=_berth_sort_key)
+    return [{"id": b, "content": label_map.get(b, b)} for b in ordered]
 
 
 def _compute_height(row: pd.Series) -> float:
@@ -245,6 +290,8 @@ def _make_options(view_start: pd.Timestamp, view_end: pd.Timestamp, editable: bo
             "add": False,
         } if editable else False,
         "groupEditable": False,
+        "groupHeightMode": "fixed",            # 선석별 행 높이를 고정
+        "groupHeight": 64,                     # 모든 선석을 동일 높이로 표시
         "min": view_start.isoformat(),
         "max": view_end.isoformat(),
         "orientation": {"axis": "top"},        # 상단에 날짜축
@@ -268,6 +315,7 @@ def render_berth_gantt(
     height: str = "780px",
     key: str = "berth_gantt",
     allowed_berths: Iterable[str] | None = None,
+    group_label_map: Dict[str, str] | None = None,
 ) -> Tuple[pd.DataFrame, Dict | None]:
     """Streamlit에서 선석 Gantt 보드를 렌더링하고 이벤트를 반영한 DataFrame을 반환."""
 
@@ -284,16 +332,23 @@ def render_berth_gantt(
     mask = (df_prepared["etd"] > view_start) & (df_prepared["eta"] < view_end)
     view_df = df_prepared.loc[mask].copy()
 
+    allowed_list: List[str] | None = None
+    label_map: Dict[str, str] = {}
+
+    if group_label_map:
+        for raw_key, display in group_label_map.items():
+            normalized_key = normalize_berth_label(raw_key)
+            if normalized_key:
+                label_map[normalized_key] = display
+
     if allowed_berths is not None:
-        allowed_set = {
-            normalize_berth_label(b)
-            for b in allowed_berths
-            if normalize_berth_label(b)
-        }
+        allowed_list = _normalize_berth_list(allowed_berths)
+        allowed_set = set(allowed_list)
         if allowed_set:
             view_df = view_df[
-                view_df["berth"].map(lambda x: normalize_berth_label(x) in allowed_set)
-
+                view_df["berth"].map(
+                    lambda x: normalize_berth_label(x) in allowed_set
+                )
             ].copy()
         else:
             view_df = view_df.iloc[0:0]
@@ -302,7 +357,11 @@ def render_berth_gantt(
         st.info("선택한 기간에 해당하는 일정이 없습니다.")
         return df_prepared, None
 
-    groups = _build_groups(view_df["berth"].dropna())
+    groups = _build_groups(
+        view_df["berth"].dropna(),
+        order=allowed_list,
+        label_map=label_map,
+    )
     items = _build_items(view_df, editable)
     options = _make_options(view_start, view_end, editable)
 
