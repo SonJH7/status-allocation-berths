@@ -293,6 +293,7 @@ def render_berth_gantt(
         if allowed_set:
             view_df = view_df[
                 view_df["berth"].map(lambda x: normalize_berth_label(x) in allowed_set)
+
             ].copy()
         else:
             view_df = view_df.iloc[0:0]

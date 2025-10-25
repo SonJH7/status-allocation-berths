@@ -183,6 +183,7 @@ def build_kst_label(base_label: str) -> str:
         return f"{base} · {timestamp} (KST)"
     return f"{timestamp} (KST)"
 
+
 # -----------------------------------------------------------
 # 크롤링 버튼 동작
 # -----------------------------------------------------------
@@ -297,6 +298,7 @@ if candidate_df is None or len(candidate_df) == 0:
 else:
     g_source_df = enrich_with_loa(candidate_df)
     g_source_df = normalize_berth_column(g_source_df)
+
     st.session_state["last_df"] = g_source_df.copy()
 
     tabs = st.tabs(["신선대 (1~5선석)", "감만 (6~9선석)"])
