@@ -1,6 +1,5 @@
 # app.py
 # BPTC "T" → "G" 선석배정 현황 시각화 (Streamlit + vis.js)
-# Author: ChatGPT (정훈님용)
 # License: MIT
 
 import os
@@ -15,9 +14,7 @@ from db import (
 )
 from crawler import fetch_bptc_t
 from validate import snap_to_interval, validate_temporal_overlaps, validate_spatial_gap
-from timeline_utils import df_to_timeline, timeline_to_df, make_timeline_options
-from plot_gantt import render_gantt_g   # ✅ G형 시각화 함수 가져오기
-
+from plot_gantt import render_berth_gantt, get_demo_df   # ✅ G형 시각화 함수 가져오기s
 
 # -----------------------------------------------------------
 # 기본 설정
@@ -146,21 +143,32 @@ elif 'df_left' in locals() and not df_left.empty:
     candidate_df = df_left
 
 if candidate_df is None or len(candidate_df) == 0:
-    st.info("크롤링하거나 버전을 선택하면 Gantt가 표시됩니다.")
+    st.info("크롤링하거나 버전을 선택하면 Gantt가 표시됩니다. 아래는 데모 데이터입니다.")
+    demo_df = get_demo_df(pd.Timestamp(g_base))
+    render_berth_gantt(
+        demo_df,
+        base_date=pd.Timestamp(g_base),
+        days=g_days,
+        editable=False,
+        snap_choice=snap_choice,
+        height="720px",
+        key="gantt_demo",
+    )
 else:
-    vdf, evt = render_gantt_g(
+    vdf, evt = render_berth_gantt(
         candidate_df,
         base_date=pd.Timestamp(g_base),
         days=g_days,
         editable=g_editable,
         snap_choice=snap_choice,
         height="780px",
-        key="gantt_main"
+        key="gantt_main",
     )
 
     st.caption("Tip: 마우스로 **좌우 드래그**하면 가로 스크롤, **CTRL+휠**로 확대/축소할 수 있습니다.")
 
     if g_editable and evt:
+        st.session_state["last_df"] = vdf
         st.info("드래그 변경이 감지되었습니다. 아래 버튼으로 새 버전으로 저장할 수 있습니다.")
         if st.button("💾 Gantt 편집 내용 저장(새 버전)"):
             vid = create_version_with_assignments(session, vdf, source="user-edit:gantt", label=f"Gantt편집({snap_choice})")
@@ -195,6 +203,41 @@ def in_scope(df: pd.DataFrame) -> pd.DataFrame:
 left_scope = in_scope(df_left).reset_index(drop=True)
 right_scope = in_scope(df_right).reset_index(drop=True)
 
+def ensure_gantt_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Codex 사양용 Gantt 보드 컬럼을 채워 넣는다."""
+
+    if df.empty:
+        # 필요한 컬럼만 갖춘 빈 DF 반환
+        cols = [
+            "berth",
+            "vessel",
+            "eta",
+            "etd",
+            "loa_m",
+            "start_meter",
+            "start_tag",
+            "end_tag",
+            "badge",
+            "status",
+        ]
+        return df.reindex(columns=cols)
+
+    work = df.copy()
+    for col in ["start_tag", "end_tag", "badge", "status"]:
+        if col not in work.columns:
+            work[col] = None
+
+    if "loa_m" not in work.columns:
+        work["loa_m"] = None
+
+    work["status"] = work["status"].fillna("gray")
+
+    return work
+
+
+left_scope = ensure_gantt_columns(left_scope)
+right_scope = ensure_gantt_columns(right_scope)
+
 
 # -----------------------------------------------------------
 # 좌/우 비교 뷰 (T형 편집용)
@@ -203,17 +246,28 @@ colA, colB = st.columns(2, gap="small")
 
 with colA:
     st.subheader("🧭 A) 편집 대상")
-    if st.session_state["working_df"].empty or set(st.session_state["working_df"].columns) != set(df_left.columns):
+    if st.session_state["working_df"].empty or set(st.session_state["working_df"].columns) != set(left_scope.columns):
         st.session_state["working_df"] = left_scope.copy()
 
-    itemsA, groupsA = df_to_timeline(st.session_state["working_df"], editable=True)
-    optionsA = make_timeline_options(snap_choice, editable=True, start=scope_from, end=scope_to)
-    timeline_eventA = st_timeline(itemsA, groupsA, optionsA, height="560px")
+    scope_delta = scope_to - scope_from
+    scope_days = max(1, int(scope_delta.total_seconds() // (24 * 3600)) + 1)
+    scope_base = pd.Timestamp(scope_from)
 
-    if isinstance(timeline_eventA, dict) and "id" in timeline_eventA:
-        st.session_state["history"].append(st.session_state["working_df"].copy())
-        st.session_state["working_df"] = timeline_to_df(st.session_state["working_df"], timeline_eventA, snap_choice)
+    prev_df = st.session_state["working_df"].copy()
+    updated_df, timeline_eventA = render_berth_gantt(
+        st.session_state["working_df"],
+        base_date=scope_base,
+        days=scope_days,
+        editable=True,
+        snap_choice=snap_choice,
+        height="560px",
+        key="timeline_left",
+    )
 
+    if timeline_eventA:
+        st.session_state["history"].append(prev_df)
+
+    st.session_state["working_df"] = ensure_gantt_columns(updated_df)
     with st.expander("자세히 보기 / LOA·start_meter 편집"):
         st.session_state["working_df"] = st.data_editor(
             st.session_state["working_df"],
@@ -227,6 +281,7 @@ with colA:
             num_rows="dynamic",
             key="editorA",
         )
+        st.session_state["working_df"] = ensure_gantt_columns(st.session_state["working_df"])
 
     if not st.session_state["working_df"].empty:
         wdf = st.session_state["working_df"].copy()
@@ -250,8 +305,14 @@ with colA:
 
 with colB:
     st.subheader("📊 B) 비교 대상 (읽기 전용)")
-    itemsB, groupsB = df_to_timeline(right_scope, editable=False)
-    optionsB = make_timeline_options(snap_choice, editable=False, start=scope_from, end=scope_to)
-    _ = st_timeline(itemsB, groupsB, optionsB, height="560px")
+    _ = render_berth_gantt(
+        right_scope,
+        base_date=pd.Timestamp(scope_from),
+        days=scope_days,
+        editable=False,
+        snap_choice=snap_choice,
+        height="560px",
+        key="timeline_right",
+    )
 
 st.caption("🔸 외부(BPTC) 시스템에는 쓰기 요청을 하지 않으며, 사내 DB 사본만 관리합니다.")
