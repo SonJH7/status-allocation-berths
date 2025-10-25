@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+import ast
 import html
+import json
 from typing import Dict, Iterable, List, Tuple
 
 import pandas as pd
@@ -141,7 +143,15 @@ def _prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     work = df.copy()
 
     # 필수 컬럼 확보
-    for col in ["start_tag", "end_tag", "badge", "status", "loa_m"]:
+    for col in [
+        "start_tag",
+        "end_tag",
+        "badge",
+        "status",
+        "loa_m",
+        "load_discharge",
+        "load_orientation",
+    ]:
         if col not in work.columns:
             work[col] = None
 
@@ -197,21 +207,287 @@ def _build_groups(
     return [{"id": b, "content": label_map.get(b, b)} for b in ordered]
 
 
+CLICK_EVENT_TYPES = {"select", "click", "itemclick", "doubleclick", "contextmenu", "tap"}
+
+LD_COLOR_PALETTE = {
+    "load": {
+        "bg": "rgba(37, 99, 235, 0.12)",
+        "border": "rgba(37, 99, 235, 0.35)",
+        "title": "#1d4ed8",
+    },
+    "discharge": {
+        "bg": "rgba(5, 150, 105, 0.12)",
+        "border": "rgba(5, 150, 105, 0.35)",
+        "title": "#047857",
+    },
+}
+
+
+def _normalize_orientation(value, fallback: str = "horizontal") -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return fallback
+    text = str(value).strip().lower()
+    if text in {"vertical", "세로", "v"}:
+        return "vertical"
+    if text in {"horizontal", "가로", "h"}:
+        return "horizontal"
+    return fallback
+
+
+def _append_entry(target: List[str], payload) -> None:
+    if payload is None or (isinstance(payload, float) and pd.isna(payload)):
+        return
+    if isinstance(payload, (list, tuple, set)):
+        for item in payload:
+            _append_entry(target, item)
+        return
+
+    text = str(payload).strip()
+    if text:
+        target.append(text)
+
+
+def _parse_load_discharge(value, orientation: str) -> tuple[str, List[str], List[str]]:
+    current_orientation = orientation
+    loads: List[str] = []
+    discharges: List[str] = []
+
+    if isinstance(value, dict):
+        if "orientation" in value:
+            current_orientation = _normalize_orientation(value.get("orientation"), current_orientation)
+        if "layout" in value:
+            current_orientation = _normalize_orientation(value.get("layout"), current_orientation)
+        for key in ("load", "loading", "적하"):
+            if key in value:
+                _append_entry(loads, value[key])
+        for key in ("discharge", "discharging", "unloading", "양하"):
+            if key in value:
+                _append_entry(discharges, value[key])
+        if "items" in value and not loads and not discharges:
+            nested = value["items"]
+            if isinstance(nested, (list, tuple, set)):
+                for item in nested:
+                    nested_orientation, nested_loads, nested_discharges = _parse_load_discharge(
+                        item, current_orientation
+                    )
+                    current_orientation = _normalize_orientation(nested_orientation, current_orientation)
+                    loads.extend(nested_loads)
+                    discharges.extend(nested_discharges)
+        return current_orientation, loads, discharges
+
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            nested_orientation, nested_loads, nested_discharges = _parse_load_discharge(item, current_orientation)
+            current_orientation = _normalize_orientation(nested_orientation, current_orientation)
+            loads.extend(nested_loads)
+            discharges.extend(nested_discharges)
+        return current_orientation, loads, discharges
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return current_orientation, loads, discharges
+
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = None
+
+        if parsed is None:
+            try:
+                parsed = ast.literal_eval(text)
+            except (ValueError, SyntaxError):
+                parsed = None
+
+        if isinstance(parsed, (dict, list, tuple, set)):
+            return _parse_load_discharge(parsed, current_orientation)
+
+        if "|" in text:
+            prefix, suffix = text.split("|", 1)
+            candidate_orientation = _normalize_orientation(prefix, current_orientation)
+            if candidate_orientation != current_orientation:
+                current_orientation = candidate_orientation
+                text = suffix.strip()
+
+        segments = [seg.strip() for seg in text.split(";") if seg.strip()]
+        matched = False
+        for segment in segments:
+            if ":" in segment:
+                key, payload = segment.split(":", 1)
+                key = key.strip().lower()
+                payload = payload.strip()
+                matched = True
+                if key in {"load", "loading", "적하"}:
+                    _append_entry(loads, payload)
+                elif key in {"discharge", "discharging", "unloading", "양하"}:
+                    _append_entry(discharges, payload)
+                else:
+                    _append_entry(loads if not loads else discharges, payload)
+            else:
+                lowered = segment.lower()
+                if lowered in {"load", "loading", "적하"}:
+                    matched = True
+                    _append_entry(loads, segment)
+                elif lowered in {"discharge", "discharging", "unloading", "양하"}:
+                    matched = True
+                    _append_entry(discharges, segment)
+
+        if not matched:
+            _append_entry(loads if not loads else discharges, text)
+
+        return current_orientation, loads, discharges
+
+    _append_entry(loads if not loads else discharges, value)
+    return current_orientation, loads, discharges
+
+
+def _build_load_discharge_html(
+    loads: List[str],
+    discharges: List[str],
+    orientation: str,
+    *,
+    compact: bool = True,
+) -> str:
+    direction = "row" if orientation == "horizontal" else "column"
+    gap = "4px" if compact else "12px"
+    margin_top = "2px" if compact else "16px"
+    body_font = "10px" if compact else "13px"
+    title_font = "10px" if compact else "12px"
+    padding = "2px 4px" if compact else "8px 12px"
+    title_margin = "1px" if compact else "6px"
+
+    def build_section(title: str, entries: List[str], role: str) -> str:
+        palette = LD_COLOR_PALETTE[role]
+        if entries:
+            body = "<br>".join(html.escape(item) for item in entries)
+        else:
+            body = "<span style=\"opacity:0.6;\">정보 없음</span>"
+        return (
+            "<div style=\"flex:1;min-width:0;"
+            f"padding:{padding};"
+            "border-radius:6px;"
+            f"background-color:{palette['bg']};"
+            f"border:1px solid {palette['border']};\">"
+            f"<div style=\"font-size:{title_font};font-weight:700;color:{palette['title']};"
+            f"margin-bottom:{title_margin};letter-spacing:0.02em;\">{title}</div>"
+            f"<div style=\"font-size:{body_font};line-height:1.35;color:#111827;"
+            "white-space:normal;word-break:keep-all;\">"
+            f"{body}</div>"
+            "</div>"
+        )
+
+    load_block = build_section("적하 (Load)", loads, "load")
+    discharge_block = build_section("양하 (Discharge)", discharges, "discharge")
+
+    return (
+        f"<div style=\"display:flex;flex-direction:{direction};gap:{gap};"
+        "width:100%;align-items:stretch;"
+        f"margin-top:{margin_top};\">"
+        f"{load_block}{discharge_block}"
+        "</div>"
+    )
+
+
+def _resolve_load_discharge(row: pd.Series, default_orientation: str) -> tuple[str, List[str], List[str]]:
+    orientation_hint = row.get("load_orientation")
+    orientation = _normalize_orientation(orientation_hint, default_orientation)
+    parsed_orientation, loads, discharges = _parse_load_discharge(row.get("load_discharge"), orientation)
+    orientation = _normalize_orientation(parsed_orientation, orientation)
+    return orientation, loads, discharges
+
+
+def _format_timestamp(value, fmt: str) -> str:
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.isna(ts):
+        return "-"
+    return ts.strftime(fmt)
+
+
+def _format_number(value) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "-"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if numeric.is_integer():
+        return f"{int(numeric):,}"
+    return f"{numeric:,.1f}"
+
+
+def _render_vessel_modal(
+    row: pd.Series,
+    row_idx,
+    orientation: str,
+    loads: List[str],
+    discharges: List[str],
+    timeline_key: str,
+) -> None:
+    vessel = str(row.get("vessel", "")).strip()
+    title = f"선박 상세 정보 — {vessel}" if vessel else "선박 상세 정보"
+    orientation_label = "가로" if orientation == "horizontal" else "세로"
+
+    modal_key = f"modal_{timeline_key}_{row_idx}"
+    with st.modal(title, key=modal_key):
+        base_info = [
+            ("선석", row.get("berth")),
+            ("입항(ETA)", _format_timestamp(row.get("eta"), "%Y-%m-%d %H:%M")),
+            ("출항(ETD)", _format_timestamp(row.get("etd"), "%Y-%m-%d %H:%M")),
+            ("LOA (m)", _format_number(row.get("loa_m"))),
+            ("시작 위치 (m)", _format_number(row.get("start_meter"))),
+        ]
+
+        details = "<br>".join(
+            f"<strong>{html.escape(label)}:</strong> {html.escape(str(value)) if value not in {None, '-'} else value}"
+            if value not in {None, '-'}
+            else f"<strong>{html.escape(label)}:</strong> -"
+            for label, value in base_info
+        )
+        st.markdown(details, unsafe_allow_html=True)
+
+        badge = row.get("badge")
+        if badge:
+            st.markdown(
+                f"<div style=\"margin-top:12px;padding:6px 10px;border-radius:6px;"
+                "background-color:rgba(14,116,144,0.08);color:#0f172a;display:inline-block;\">"
+                f"배지: {html.escape(str(badge))}</div>",
+                unsafe_allow_html=True,
+            )
+
+        load_html = _build_load_discharge_html(loads, discharges, orientation, compact=False)
+        st.markdown("---")
+        st.markdown(f"**적하/양하 정보** · 표시 방향: {orientation_label}")
+        st.markdown(load_html, unsafe_allow_html=True)
+
 def _compute_height(row: pd.Series) -> float:
-    """모든 선석 블록의 높이를 고정된 범위 내 값으로 유지한다."""
+    """선박 LOA 값을 고려해 블록 높이를 가변적으로 계산."""
 
-    DEFAULT_HEIGHT = 40.0
-    MIN_HEIGHT = 20.0
-    MAX_HEIGHT = 80.0
+    DEFAULT_HEIGHT = 48.0
+    MIN_HEIGHT = 28.0
+    MAX_HEIGHT = 96.0
 
-    return max(MIN_HEIGHT, min(MAX_HEIGHT, DEFAULT_HEIGHT))
+    loa_val = row.get("loa_m")
+    try:
+        loa_float = float(loa_val)
+    except (TypeError, ValueError):
+        loa_float = None
+
+    if loa_float is None or pd.isna(loa_float):
+        return DEFAULT_HEIGHT
+
+    scaled = 28.0 + loa_float * 0.25
+    return max(MIN_HEIGHT, min(MAX_HEIGHT, scaled))
 
 
-def _build_item(row: pd.Series, idx: int, editable: bool) -> Dict:
-    vessel = html.escape(str(row.get("vessel", "")))
+def _build_item(row: pd.Series, idx: int, editable: bool, default_orientation: str) -> Dict:
+    vessel_label = str(row.get("vessel", ""))
+    vessel = html.escape(vessel_label)
     start_tag = row.get("start_tag")
     end_tag = row.get("end_tag")
     badge = row.get("badge")
+
+    orientation, loads, discharges = _resolve_load_discharge(row, default_orientation)
+    load_html = _build_load_discharge_html(loads, discharges, orientation)
 
     start_tag_html = (
         f'<span style="position:absolute;top:2px;left:4px;font-size:10px;opacity:.8;">{html.escape(str(start_tag))}</span>'
@@ -227,10 +503,11 @@ def _build_item(row: pd.Series, idx: int, editable: bool) -> Dict:
     )
 
     content = (
-        "<div style=\"position:relative;\">"
+        "<div style=\"position:relative;width:100%;height:100%;display:flex;flex-direction:column;justify-content:flex-start;\">"
         f"{start_tag_html}"
-        f"<div style=\"text-align:center;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;\">{vessel}</div>"
         f"{end_tag_html}"
+        f"<div style=\"text-align:center;font-weight:700;font-size:12px;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;\">{vessel}</div>"
+        f"{load_html}"
         f"{badge_html}"
         "</div>"
     )
@@ -244,39 +521,50 @@ def _build_item(row: pd.Series, idx: int, editable: bool) -> Dict:
         "border:1px solid rgba(0,0,0,.25);"
         "border-radius:6px;"
         "font-size:12px;"
-        "padding:2px 6px;"
-        "line-height:16px;"
+        "padding:4px 6px;"
+        "line-height:1.35;"
         "color:#1f2937;"
         "display:flex;"
-        "align-items:center;"
+        "align-items:stretch;"
         "justify-content:center;"
+        "overflow:hidden;"
         f"height:{height}px;"
     )
 
-    start = pd.to_datetime(row["eta"])
-    end = pd.to_datetime(row["etd"])
+    tooltip_lines = [
+        vessel_label or "선박",
+        f"선석: {row.get('berth', '-')}",
+        f"ETA: {_format_timestamp(row.get('eta'), '%m/%d %H:%M')}",
+        f"ETD: {_format_timestamp(row.get('etd'), '%m/%d %H:%M')}",
+    ]
 
-    tooltip = (
-        f"{vessel}<br>선석: {row['berth']}<br>ETA: {start:%m/%d %H:%M}<br>ETD: {end:%m/%d %H:%M}"
-    )
+    if loads:
+        tooltip_lines.append("적하: " + ", ".join(loads))
+    if discharges:
+        tooltip_lines.append("양하: " + ", ".join(discharges))
+
+    tooltip = "<br>".join(html.escape(line) for line in tooltip_lines)
 
     return {
         "id": str(idx),
         "group": str(row["berth"]),
         "content": content,
-        "start": start.isoformat(),
-        "end": end.isoformat(),
+        "start": pd.to_datetime(row["eta"]).isoformat(),
+        "end": pd.to_datetime(row["etd"]).isoformat(),
         "editable": editable,
         "style": style,
         "title": tooltip,
+        "orientation": orientation,
+        "loadEntries": loads,
+        "dischargeEntries": discharges,
     }
 
 
-def _build_items(view_df: pd.DataFrame, editable: bool) -> List[Dict]:
+def _build_items(view_df: pd.DataFrame, editable: bool, default_orientation: str) -> List[Dict]:
     items: List[Dict] = []
     for idx in view_df.index:
         row = view_df.loc[idx]
-        items.append(_build_item(row, idx, editable))
+        items.append(_build_item(row, idx, editable, default_orientation))
     return items
 
 
@@ -314,6 +602,7 @@ def render_berth_gantt(
     snap_choice: str = "1h",
     height: str = "780px",
     key: str = "berth_gantt",
+    load_discharge_orientation: str = "horizontal",
     allowed_berths: Iterable[str] | None = None,
     group_label_map: Dict[str, str] | None = None,
 ) -> Tuple[pd.DataFrame, Dict | None]:
@@ -362,21 +651,27 @@ def render_berth_gantt(
         order=allowed_list,
         label_map=label_map,
     )
-    items = _build_items(view_df, editable)
+    items = _build_items(view_df, editable, load_discharge_orientation)
     options = _make_options(view_start, view_end, editable)
 
     _ensure_timeline_css(key)
 
     event = st_timeline(items, groups, options, height=height, key=key)
 
-    if isinstance(event, dict) and event.get("id") is not None:
-        raw_id = event["id"]
-        try:
-            row_idx = int(raw_id)
-        except (TypeError, ValueError):
-            row_idx = raw_id
+    modal_context: tuple[pd.Series, int | str, str, List[str], List[str]] | None = None
+    event_payload: Dict | None = None
 
-        if row_idx in view_df.index:
+    if isinstance(event, dict):
+        raw_id = event.get("id") if event.get("id") is not None else event.get("item")
+        row_idx = None
+        if raw_id is not None:
+            try:
+                row_idx = int(raw_id)
+            except (TypeError, ValueError):
+                row_idx = raw_id
+
+        if row_idx is not None and row_idx in view_df.index and row_idx in df_prepared.index:
+            event_payload = event
             if "start" in event:
                 snapped = snap_to_interval(pd.to_datetime(event["start"]), snap_choice)
                 view_df.loc[row_idx, "eta"] = snapped
@@ -390,9 +685,25 @@ def render_berth_gantt(
                 view_df.loc[row_idx, "berth"] = normalized
                 df_prepared.loc[row_idx, "berth"] = normalized
 
-            return df_prepared.reset_index(drop=True), event
+            event_type = str(event.get("event") or event.get("type") or "").lower()
+            has_edit_keys = any(key in event for key in ("start", "end", "group"))
+            should_open_modal = False
 
-    return df_prepared.reset_index(drop=True), None
+            if event_type in CLICK_EVENT_TYPES and not has_edit_keys:
+                should_open_modal = True
+            elif not event_type and not has_edit_keys:
+                should_open_modal = True
+
+            if should_open_modal:
+                modal_row = df_prepared.loc[row_idx]
+                orientation, loads, discharges = _resolve_load_discharge(modal_row, load_discharge_orientation)
+                modal_context = (modal_row.copy(), row_idx, orientation, loads, discharges)
+
+    if modal_context is not None:
+        modal_row, modal_idx, modal_orientation, modal_loads, modal_discharges = modal_context
+        _render_vessel_modal(modal_row, modal_idx, modal_orientation, modal_loads, modal_discharges, key)
+
+    return df_prepared.reset_index(drop=True), event_payload
 
 
 def get_demo_df(base_date: pd.Timestamp | None = None) -> pd.DataFrame:
