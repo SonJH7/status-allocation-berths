@@ -16,7 +16,10 @@ from streamlit_timeline import st_timeline
 from bptc_vslmsg import fetch_bptc_g_vslmsg
 
 import numpy as np
+from sqlalchemy.exc import SQLAlchemyError
+
 from db import SessionLocal, get_vessel_loa_map, _normalize_berth_code as normalize_berth_code
+
 # ------------------------------------------------------------
 # 상수 정의
 # ------------------------------------------------------------
@@ -263,6 +266,45 @@ def attach_vessel_loa(df: pd.DataFrame) -> pd.DataFrame:
     session = SessionLocal()
     try:
         loa_map = get_vessel_loa_map(session, vessels.unique())
+    finally:
+        session.close()
+
+    if not loa_map:
+        return df
+
+    enriched = df.copy()
+    vessel_key = enriched["vessel"].astype(str).str.strip()
+    loa_series = vessel_key.map(loa_map)
+
+    if "loa_m" in enriched.columns:
+        missing_mask = enriched["loa_m"].isna()
+        enriched.loc[missing_mask, "loa_m"] = loa_series[missing_mask]
+    else:
+        enriched["loa_m"] = loa_series
+
+    return enriched
+
+
+def attach_vessel_loa(df: pd.DataFrame) -> pd.DataFrame:
+    """데이터프레임에 선박 LOA 정보를 결합한다."""
+
+    if df is None or df.empty or "vessel" not in df.columns:
+        return df
+
+    vessels = (
+        df["vessel"].dropna().astype(str).str.strip()
+    )
+    vessels = vessels[vessels != ""]
+    if vessels.empty:
+        return df
+
+    session = SessionLocal()
+    try:
+        loa_map = get_vessel_loa_map(session, vessels.unique())
+    except SQLAlchemyError as exc:
+        session.rollback()
+        print(f"⚠️ LOA 조회 실패: {exc}")
+        return df
     finally:
         session.close()
 
@@ -781,7 +823,7 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
 
     vessel_html = html.escape(vessel)
 
-    html_content = f"""
+    card_html = f"""
     <div class='berth-item-card'>
         <div class='time-row'><span>{start_text}</span><span>{end_text}</span></div>
         {marker_top_html}
@@ -828,7 +870,7 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
         )
 
     tooltip = "<br/>".join([part for part in tooltip_parts if part])
-    return html_content, tooltip
+    return card_html, tooltip
 
     options = {
         "stack": False,
