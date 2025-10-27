@@ -470,6 +470,30 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
     tooltip = "<br/>".join([part for part in tooltip_parts if part])
     return html, tooltip
 
+    options = {
+        "stack": False,
+        "editable": {
+            "updateTime": True,
+            "updateGroup": True,
+            "remove": False,
+            "add": False,
+        }
+        if editable
+        else False,
+        "groupEditable": False,
+        "min": view_start.isoformat(),
+        "max": view_end.isoformat(),
+        "orientation": {"axis": "top"},
+        "margin": {"item": 6, "axis": 12},
+        "multiselect": False,
+        "moveable": True,
+        "zoomable": True,
+        "zoomKey": "ctrlKey",
+        "zoomMin": 1000 * 60 * 15,
+        "zoomMax": 1000 * 60 * 60 * 24 * 30,
+        "timeAxis": {"scale": "day", "step": 1},
+        "locale": "ko",
+    }
 
 def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
