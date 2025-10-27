@@ -2,6 +2,7 @@
 # Streamlit + vis.js 타임라인 기반 BPTC 선석 현황 보드
 from __future__ import annotations
 
+import io
 import html
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
