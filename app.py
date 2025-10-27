@@ -98,6 +98,13 @@ AXIS_BACKGROUND_COLOR = "#e5f3ff"
 
 BP_BASELINE_M = 1500.0
 BERTH_VERTICAL_SPAN_PX = 300.0
+BERTH_METER_RANGES: Dict[str, Tuple[float, float]] = {
+    "1": (0.0, 300.0),
+    "2": (301.0, 600.0),
+    "3": (601.0, 900.0),
+    "4": (901.0, 1200.0),
+    "5": (1200.0, 1500.0),
+}
 QUARANTINE_MARKER_KEYS = ("quarantine_flag", "quarantine", "검역")
 PILOT_MARKER_KEYS = ("pilot_flag", "pilotage_flag", "pilotage", "pilot", "pilot_text", "도선")
 
@@ -632,12 +639,36 @@ def extract_meter_range(row: pd.Series) -> Tuple[Optional[float], Optional[float
     return lower, upper
 
 
+def get_berth_meter_range(berth_value: object) -> Optional[Tuple[float, float]]:
+    if berth_value is None or pd.isna(berth_value):
+        return None
+    key = str(berth_value).strip()
+    if not key:
+        return None
+    return BERTH_METER_RANGES.get(key)
+
+
+def resolve_berth_span(row: pd.Series) -> Optional[float]:
+    berth_range = get_berth_meter_range(row.get("berth"))
+    if berth_range is None:
+        return None
+    start, end = berth_range
+    if start is None or end is None:
+        return None
+    span = float(end - start)
+    if span <= 0:
+        return None
+    return span
+
+
 def compute_item_height(row: pd.Series) -> float:
+    berth_span = resolve_berth_span(row)
+    max_height = berth_span if berth_span is not None else BERTH_VERTICAL_SPAN_PX
     start_meter, end_meter = extract_meter_range(row)
     if start_meter is not None and end_meter is not None:
         span = abs(end_meter - start_meter)
         if span > 0:
-            return float(max(24.0, min(BERTH_VERTICAL_SPAN_PX, span)))
+            return float(max(24.0, min(max_height, span)))
 
     length_val = row.get("loa_m")
     if length_val is None or pd.isna(length_val):
@@ -650,7 +681,7 @@ def compute_item_height(row: pd.Series) -> float:
     if numeric is None or pd.isna(numeric):
         return 86.0
     scaled = numeric
-    return float(max(24.0, min(BERTH_VERTICAL_SPAN_PX, scaled)))
+    return float(max(24.0, min(max_height, scaled)))
 
 
 def compute_item_offset(row: pd.Series, item_height: float) -> float:
@@ -680,11 +711,27 @@ def compute_item_offset(row: pd.Series, item_height: float) -> float:
 
     anchor = max(anchor_candidates)
 
-    offset = BP_BASELINE_M - anchor
-    if offset < 0:
-        offset = 0.0
+    berth_range = get_berth_meter_range(row.get("berth"))
+    if berth_range is not None:
+        start, end = berth_range
+        range_span = None
+        if start is not None and end is not None:
+            anchor = min(max(anchor, float(start)), float(end))
+            range_span = float(end - start) if end > start else None
+            baseline = float(end)
+        else:
+            baseline = BP_BASELINE_M
+        offset = baseline - anchor
+        if offset < 0:
+            offset = 0.0
+        max_span = range_span if range_span is not None and range_span > 0 else BERTH_VERTICAL_SPAN_PX
+        max_offset = max(0.0, max_span - item_height)
+    else:
+        offset = BP_BASELINE_M - anchor
+        if offset < 0:
+            offset = 0.0
+        max_offset = max(0.0, BERTH_VERTICAL_SPAN_PX - item_height)
 
-    max_offset = max(0.0, BERTH_VERTICAL_SPAN_PX - item_height)
     if offset > max_offset:
         offset = max_offset
     return float(offset)
@@ -976,9 +1023,9 @@ def render_berth_gantt(
     spacing_conflicts = collect_spacing_conflicts(view_df)
     gap_flags = mark_spacing_warnings(view_df, conflicts=spacing_conflicts)
     gap_flags_map = gap_flags.to_dict()
+    conflict_texts: List[str] = []
 
     if spacing_conflicts:
-        conflict_texts = []
         for conflict in spacing_conflicts:
             berth = conflict.get("berth")
             gap = conflict.get("gap")
@@ -1006,18 +1053,28 @@ def render_berth_gantt(
             conflict_texts.append(
                 f"{berth}선석 {prev_v}({prev_range_txt}) ↔ {curr_v}({curr_range_txt}) : 간격 {gap_display}"
             )
-        st.warning(
-            "배 간격 30m 미만 선박이 있습니다:\n- " + "\n- ".join(conflict_texts),
-            icon="⚠️",
-        )
+
+    resolved_group_label_map: Dict[str, str] = {}
+    if group_label_map is not None:
+        resolved_group_label_map = {
+            str(key): value for key, value in group_label_map.items()
+        }
 
     groups = []
     for berth in berth_order:
         label_value = (
-            group_label_map.get(str(berth))
-            if group_label_map is not None
+            resolved_group_label_map.get(str(berth))
+            if resolved_group_label_map
             else None
         )
+        if not label_value:
+            berth_range = get_berth_meter_range(berth)
+            if berth_range is not None:
+                start, end = berth_range
+                start_txt = f"{int(start)}" if start is not None else ""
+                end_txt = f"{int(end)}" if end is not None else ""
+                if start_txt or end_txt:
+                    label_value = f"{berth} ({start_txt}~{end_txt}m)"
         display_label = label_value if label_value else berth
         groups.append(
             {
@@ -1161,6 +1218,15 @@ def render_berth_gantt(
     }
 
     event_result = st_timeline(items, groups, options, height=height, key=key)
+
+    if conflict_texts:
+        toggle_label = f"⚠️ 배 간격 30m 미만 선박 경고 보기 ({len(conflict_texts)}건)"
+        toggle_key = f"{key}_spacing_warning_toggle"
+        show_conflicts = st.toggle(toggle_label, value=False, key=toggle_key)
+        if show_conflicts:
+            st.warning("배 간격 30m 미만 선박이 있습니다.", icon="⚠️")
+            for text in conflict_texts:
+                st.markdown(f"- {text}")
 
     updated = prepared.copy()
     event_payload: Optional[Dict] = None
