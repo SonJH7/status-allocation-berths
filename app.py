@@ -128,11 +128,28 @@ def flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _ensure_unique_columns(columns: Iterable[Any]) -> List[Any]:
+    """중복 컬럼명을 손실 없이 고유하게 만든다."""
+
+    seen: Dict[Any, int] = {}
+    unique: List[Any] = []
+    for col in columns:
+        key = col
+        if key in seen:
+            seen[key] += 1
+            base = str(col) if col not in (None, "") else "unnamed"
+            unique.append(f"{base}_{seen[key]}")
+        else:
+            seen[key] = 0
+            unique.append(col)
+    return unique
+
+
 def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
     df = flatten_columns(df)
     if df.columns.duplicated().any():
-        deduped = ~df.columns.duplicated(keep="last")
-        df = df.loc[:, deduped]
+        df = df.copy()
+        df.columns = _ensure_unique_columns(df.columns)
     rename_map = {col: COLUMN_RENAME_MAP.get(col, col) for col in df.columns}
     df = df.rename(columns=rename_map)
     return df
@@ -188,9 +205,59 @@ def _fetch_dataframe_via_http(v_time: str, start_day: Optional[str]) -> pd.DataF
         raise RuntimeError(f"BPTC 요청 실패: {response.status_code}")
 
     soup = BeautifulSoup(response.text, "lxml")
-    tables = pd.read_html(io.StringIO(str(soup)), flavor="lxml")
+
+    parse_errors: List[str] = []
+    tables: List[pd.DataFrame] = []
+    html_source = str(soup)
+    for flavor in ("lxml", "bs4"):
+        try:
+            tables = pd.read_html(io.StringIO(html_source), flavor=flavor)
+        except ValueError as exc:
+            parse_errors.append(f"{flavor}: {exc}")
+            continue
+        except Exception as exc:  # pragma: no cover - 안전망
+            parse_errors.append(f"{flavor}: {exc}")
+            continue
+        if tables:
+            break
+
+    def _manual_parse() -> Optional[pd.DataFrame]:
+        table_tag = soup.find("table")
+        if table_tag is None:
+            return None
+
+        rows: List[List[str]] = []
+        header: List[str] = []
+        for idx, tr in enumerate(table_tag.find_all("tr")):
+            cells = tr.find_all(["th", "td"])
+            if not cells:
+                continue
+            values = [cell.get_text(strip=True) for cell in cells]
+            if idx == 0 and tr.find_all("th"):
+                header = values
+            else:
+                rows.append(values)
+
+        if not rows:
+            return None
+
+        max_len = max(len(header), *(len(r) for r in rows)) if rows else len(header)
+        if header and len(header) < max_len:
+            header = header + [f"unnamed_{i}" for i in range(len(header), max_len)]
+        elif not header:
+            header = [f"col_{i}" for i in range(max_len)]
+
+        normalized_rows = [row + [None] * (max_len - len(row)) for row in rows]
+        return pd.DataFrame(normalized_rows, columns=header)
+
     if not tables:
-        raise RuntimeError("테이블을 찾을 수 없습니다.")
+        manual_df = _manual_parse()
+        if manual_df is not None and not manual_df.empty:
+            return manual_df
+
+    if not tables:
+        detail = f" 세부 오류: {'; '.join(parse_errors)}" if parse_errors else ""
+        raise RuntimeError("테이블을 찾을 수 없습니다." + detail)
 
     candidate = max(tables, key=lambda tbl: tbl.shape[1])
     return candidate
@@ -391,72 +458,6 @@ def fetch_vslmsg_dataframe() -> pd.DataFrame:
     except Exception as exc:
         print(f"⚠️ VslMsg 크롤링 실패: {exc}")
         return pd.DataFrame()
-
-
-def get_demo_df(base_date: Optional[pd.Timestamp] = None) -> pd.DataFrame:
-    base = pd.Timestamp(base_date) if base_date is not None else pd.Timestamp.today()
-    day0 = base.normalize()
-
-    rows: List[Dict[str, object]] = []
-
-    def add_row(
-        berth: str,
-        vessel: str,
-        voyage: str,
-        start_hours: int,
-        duration_hours: int,
-        load_qty: int,
-        discharge_qty: int,
-        sh_qty: int,
-        transfer_qty: int,
-        operator: str,
-        route: str,
-        mooring: str,
-        start_tag: str,
-        end_tag: str,
-        terminal_group: str,
-        badge: Optional[str] = None,
-    ) -> None:
-        start = day0 + timedelta(hours=start_hours)
-        end = start + timedelta(hours=duration_hours)
-        rows.append(
-            {
-                "terminal_group": terminal_group,
-                "berth": berth,
-                "vessel": vessel,
-                "voyage": voyage,
-                "eta_plan": start - timedelta(hours=4),
-                "eta": start,
-                "work_complete": end - timedelta(hours=2),
-                "etd": end,
-                "inbound_cutoff": start - timedelta(hours=12),
-                "load_qty": load_qty,
-                "discharge_qty": discharge_qty,
-                "sh_qty": sh_qty,
-                "transfer_qty": transfer_qty,
-                "operator": operator,
-                "route": route,
-                "mooring_type": mooring,
-                "quarantine_flag": badge if badge == "검역" else "",
-                "start_tag": start_tag,
-                "end_tag": end_tag,
-            }
-        )
-
-    add_row("1", "CKSM-18", "S-01", -12, 30, 150, 110, 30, 15, "CKSM", "JPN", "S", "15", "11", "신선대", "도선")
-    add_row("1", "KOBE STAR", "S-11", 20, 18, 240, 60, 20, 0, "KMTC", "KOR", "P", "24", "06", "신선대", "검역")
-    add_row("2", "MOON BAY", "S-07", -5, 26, 90, 70, 10, 5, "PAN", "CHN", "S", "09", "07", "신선대", "도선")
-    add_row("2", "HANIL SUN", "S-05", 30, 16, 50, 80, 14, 9, "HAN", "DOM", "P", "05", "08", "신선대", "도선")
-    add_row("3", "KARISMA", "S-20", 10, 20, 120, 30, 18, 4, "ONE", "SEA", "S", "22", "03", "신선대", "검역")
-    add_row("4", "ORIENT GLORY", "S-13", 5, 30, 160, 40, 22, 7, "EAS", "VNM", "P", "11", "04", "신선대", "도선")
-    add_row("5", "TITAN", "S-02", -8, 28, 130, 90, 12, 11, "SIN", "CHN", "S", "13", "09", "신선대", "검역")
-    add_row("6", "BLUE PEARL", "G-08", 6, 34, 210, 180, 30, 14, "CKS", "DOM", "S", "17", "25", "감만", "도선")
-    add_row("7", "SUNRISE", "G-09", -6, 40, 180, 150, 20, 10, "KMTC", "JPN", "P", "18", "12", "감만", "검역")
-    add_row("8", "PACIFIC WIND", "G-05", 18, 26, 200, 210, 24, 18, "HMM", "VNM", "S", "07", "06", "감만", "도선")
-    add_row("9", "HAN RIVER", "G-03", 24, 18, 80, 140, 8, 0, "EAS", "KOR", "P", "14", "05", "감만", "도선")
-
-    demo_df = pd.DataFrame(rows)
-    return demo_df
 
 
 def snap_to_interval(ts: pd.Timestamp, key: str) -> pd.Timestamp:
@@ -1529,19 +1530,18 @@ if "raw_df" not in st.session_state:
             default_v_time,
         )
         st.session_state["failed_fetch_params"] = None
-    except Exception:
-        demo_df = get_demo_df()
-        st.session_state["raw_df"] = demo_df.copy()
-        st.session_state["working_df"] = demo_df.copy()
-        st.session_state["last_updated"] = datetime.now()
+    except Exception as exc:
+        st.session_state["raw_df"] = pd.DataFrame()
+        st.session_state["working_df"] = pd.DataFrame()
+        st.session_state["last_updated"] = None
         st.session_state["history"] = []
-        st.warning("실제 데이터를 불러오지 못해 데모 데이터를 사용합니다.")
         st.session_state["data_fetch_params"] = None
         st.session_state["failed_fetch_params"] = (
             default_start_key,
             default_end_key,
             default_v_time,
         )
+        st.error(f"초기 데이터 로드에 실패했습니다: {exc}")
 
 with st.sidebar:
     st.markdown("### 데이터 로드")
@@ -1583,16 +1583,6 @@ with st.sidebar:
             st.session_state["failed_fetch_params"] = None
             if not reload_data(show_success=True):
                 st.session_state["failed_fetch_params"] = current_fetch_params
-
-    if st.button("데모 데이터로 대체", key="demo_replace", use_container_width=True):
-        demo_df = get_demo_df()
-        st.session_state["raw_df"] = demo_df.copy()
-        st.session_state["working_df"] = demo_df.copy()
-        st.session_state["last_updated"] = datetime.now()
-        st.session_state["history"] = []
-        st.session_state["data_fetch_params"] = current_fetch_params
-        st.session_state["failed_fetch_params"] = current_fetch_params
-        st.success("데모 데이터를 불러왔습니다.")
 
     operator_filter = st.text_input("선사 필터", value="")
     route_filter = st.text_input("항로 필터", value="")
