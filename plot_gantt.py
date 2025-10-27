@@ -479,35 +479,135 @@ def _compute_height(row: pd.Series) -> float:
     return max(MIN_HEIGHT, min(MAX_HEIGHT, scaled))
 
 
+def _abbreviate_vessel_label(name: str, max_length: int = 12) -> str:
+    """선박명을 카드 내에서 짧게 표현한다."""
+
+    if not name:
+        return ""
+
+    text = str(name).strip()
+    if len(text) <= max_length:
+        return text
+
+    # 복수 단어인 경우 머리글자를 활용한다.
+    words = [segment for segment in text.replace("-", " ").split() if segment]
+    if len(words) >= 2:
+        acronym = "".join(word[0].upper() for word in words if word[0].isalnum())
+        if 2 <= len(acronym) <= max_length:
+            return acronym
+
+    return text[: max_length - 1] + "…"
+
+
+def _extract_meter_value(row: pd.Series, candidates: Iterable[str]):
+    for key in candidates:
+        if key not in row.index:
+            continue
+        value = row.get(key)
+        if value is None:
+            continue
+        if isinstance(value, float) and pd.isna(value):
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def _format_meter_value(value) -> tuple[str, bool]:
+    if value is None:
+        return "-", False
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return "-", False
+        try:
+            numeric = float(text.replace(",", ""))
+        except ValueError:
+            return text, False
+    else:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return str(value), False
+
+    if pd.isna(numeric):
+        return "-", False
+
+    if abs(numeric - round(numeric)) < 1e-6:
+        return f"{int(round(numeric))}", True
+
+    return f"{numeric:.1f}", True
+
+
+def _build_fe_html(row: pd.Series) -> str:
+    f_raw = _extract_meter_value(row, ("f_pos", "F_POS", "start_meter"))
+    e_raw = _extract_meter_value(row, ("e_pos", "E_POS", "end_meter"))
+
+    f_text, f_is_numeric = _format_meter_value(f_raw)
+    e_text, e_is_numeric = _format_meter_value(e_raw)
+
+    if f_text == "-" and e_text == "-":
+        return ""
+
+    def _render(label: str, text: str, numeric: bool) -> str:
+        if text == "-":
+            return f"<span style=\"opacity:0.65;\">{label} -</span>"
+        suffix = "m" if numeric and not text.lower().endswith("m") else ""
+        return f"<span>{label} {html.escape(text)}{suffix}</span>"
+
+    return (
+        "<div style=\"display:flex;justify-content:space-between;align-items:center;"
+        "margin-top:6px;font-size:11px;font-weight:600;letter-spacing:0.01em;\">"
+        f"{_render('F', f_text, f_is_numeric)}"
+        f"{_render('E', e_text, e_is_numeric)}"
+        "</div>"
+    )
+
+
 def _build_item(row: pd.Series, idx: int, editable: bool, default_orientation: str) -> Dict:
     vessel_label = str(row.get("vessel", ""))
-    vessel = html.escape(vessel_label)
-    start_tag = row.get("start_tag")
-    end_tag = row.get("end_tag")
+    vessel_display = html.escape(_abbreviate_vessel_label(vessel_label))
     badge = row.get("badge")
 
     orientation, loads, discharges = _resolve_load_discharge(row, default_orientation)
-    load_html = _build_load_discharge_html(loads, discharges, orientation)
+
+    eta_text = _format_timestamp(row.get("eta"), "%H:%M")
+    etd_text = _format_timestamp(row.get("etd"), "%H:%M")
+    if eta_text == "-":
+        start_fallback = row.get("start_tag")
+        if pd.notna(start_fallback) and str(start_fallback):
+            eta_text = str(start_fallback)
+    if etd_text == "-":
+        end_fallback = row.get("end_tag")
+        if pd.notna(end_fallback) and str(end_fallback):
+            etd_text = str(end_fallback)
 
     start_tag_html = (
-        f'<span style="position:absolute;top:2px;left:4px;font-size:10px;opacity:.8;">{html.escape(str(start_tag))}</span>'
-        if pd.notna(start_tag) and str(start_tag) else ""
+        f'<span style="position:absolute;top:2px;left:4px;font-size:10px;font-weight:600;opacity:.85;">시작 {html.escape(eta_text)}</span>'
+        if eta_text != "-"
+        else ""
     )
     end_tag_html = (
-        f'<span style="position:absolute;top:2px;right:4px;font-size:10px;opacity:.8;">{html.escape(str(end_tag))}</span>'
-        if pd.notna(end_tag) and str(end_tag) else ""
+        f'<span style="position:absolute;top:2px;right:4px;font-size:10px;font-weight:600;opacity:.85;">종료 {html.escape(etd_text)}</span>'
+        if etd_text != "-"
+        else ""
     )
     badge_html = (
         f'<div style="position:absolute;bottom:2px;left:50%;transform:translateX(-50%);font-size:11px;color:#0b69ff;">{html.escape(str(badge))}</div>'
-        if pd.notna(badge) and str(badge) else ""
+        if pd.notna(badge) and str(badge)
+        else ""
     )
+
+    fe_html = _build_fe_html(row)
 
     content = (
         "<div style=\"position:relative;width:100%;height:100%;display:flex;flex-direction:column;justify-content:flex-start;\">"
         f"{start_tag_html}"
         f"{end_tag_html}"
-        f"<div style=\"text-align:center;font-weight:700;font-size:12px;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;\">{vessel}</div>"
-        f"{load_html}"
+        f"<div style=\"text-align:center;font-weight:700;font-size:12px;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;\">{vessel_display}</div>"
+        f"{fe_html}"
         f"{badge_html}"
         "</div>"
     )
