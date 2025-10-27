@@ -1224,7 +1224,29 @@ else:
                 render_modal(modal_row)
 
     with st.expander("현재 테이블 보기", expanded=False):
-        st.dataframe(working_df_after, use_container_width=True)
+        table_df = working_df_after.copy()
+        if not table_df.empty:
+            if "bitt" in table_df.columns and "bp" not in table_df.columns:
+                table_df.insert(
+                    min(3, len(table_df.columns)),
+                    "bp",
+                    table_df["bitt"],
+                )
+            if "f_pos" in table_df.columns and "F" not in table_df.columns:
+                insert_at = (
+                    table_df.columns.get_loc("bp") + 1
+                    if "bp" in table_df.columns
+                    else min(4, len(table_df.columns))
+                )
+                table_df.insert(insert_at, "F", table_df["f_pos"])
+            if "e_pos" in table_df.columns and "E" not in table_df.columns:
+                insert_at = (
+                    table_df.columns.get_loc("F") + 1
+                    if "F" in table_df.columns
+                    else min(5, len(table_df.columns))
+                )
+                table_df.insert(insert_at, "E", table_df["e_pos"])
+        st.dataframe(table_df, use_container_width=True)
 
     diff_df = compute_diff(st.session_state.get("raw_df"), working_df_after)
     if not diff_df.empty:
