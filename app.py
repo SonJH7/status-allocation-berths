@@ -362,29 +362,29 @@ def ensure_timeline_css() -> None:
             color: #1f2937;
             font-weight: 700;
         }}
-        .berth-label {
+        .berth-label {{
             display: flex;
             flex-direction: column;
             gap: 4px;
             align-items: flex-start;
-        }
-        .berth-label .berth-name {
+        }}
+        .berth-label .berth-name {{
             font-weight: 700;
             font-size: 15px;
             color: #0f2d4c;
-        }
-        .berth-label .bp-axis {
+        }}
+        .berth-label .bp-axis {{
             display: flex;
             flex-direction: column;
             gap: 2px;
             font-size: 11px;
             color: #4b5563;
             line-height: 1.1;
-        }
-        .berth-label .bp-axis span:first-child {
+        }}
+        .berth-label .bp-axis span:first-child {{
             color: #1f2937;
             font-weight: 700;
-        }
+        }}
         .vis-timeline .vis-item.berth-item {{
             border-radius: 12px;
             border: 2px solid rgba(15, 45, 76, 0.2);
