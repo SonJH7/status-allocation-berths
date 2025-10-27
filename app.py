@@ -748,7 +748,7 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
 
     vessel_html = html.escape(vessel)
 
-    html = f"""
+    html_content = f"""
     <div class='berth-item-card'>
         <div class='time-row'><span>{start_text}</span><span>{end_text}</span></div>
         {marker_top_html}
@@ -795,7 +795,7 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
         )
 
     tooltip = "<br/>".join([part for part in tooltip_parts if part])
-    return html, tooltip
+    return html_content, tooltip
 
     options = {
         "stack": False,
