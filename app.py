@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import io
+import re
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -14,6 +15,7 @@ from bs4 import BeautifulSoup
 from streamlit_timeline import st_timeline
 
 from bptc_vslmsg import fetch_bptc_g_vslmsg
+from crawling_adapter import collect_crawling_dataframe
 
 import numpy as np
 from sqlalchemy.exc import SQLAlchemyError
@@ -53,6 +55,11 @@ COLUMN_RENAME_MAP = {
     "전배": "transfer_qty",
     "항로": "route",
     "검역": "quarantine_flag",
+    "Length(m)": "length_m",
+    "Beam(m)": "beam_m",
+    "bp": "bp_meter",
+    "f": "f_pos",
+    "e": "e_pos",
 }
 
 TIME_COLUMNS = ["eta_plan", "eta", "work_complete", "etd", "inbound_cutoff"]
@@ -162,10 +169,7 @@ def row_to_jsonable(row: pd.Series) -> Dict[str, Any]:
     return {key: ensure_jsonable_value(val) for key, val in row.items()}
 
 
-@st.cache_data(show_spinner=False)
-def fetch_bptc_dataframe(v_time: str = "7days", start_day: Optional[str] = None) -> pd.DataFrame:
-    """BPTC 텍스트 서블릿에서 테이블 전체를 크롤링."""
-
+def _fetch_dataframe_via_http(v_time: str, start_day: Optional[str]) -> pd.DataFrame:
     form_payload = dict(BPTC_FORM_PAYLOAD)
     form_payload["v_time"] = v_time
     if start_day:
@@ -189,8 +193,62 @@ def fetch_bptc_dataframe(v_time: str = "7days", start_day: Optional[str] = None)
         raise RuntimeError("테이블을 찾을 수 없습니다.")
 
     candidate = max(tables, key=lambda tbl: tbl.shape[1])
-    df = normalize_column_names(candidate)
+    return candidate
 
+
+def _parse_fetch_window(v_time: str) -> int:
+    match = re.match(r"(\d+)", str(v_time))
+    if not match:
+        return 0
+    return int(match.group(1))
+
+
+def _filter_by_window(df: pd.DataFrame, start_day: Optional[str], v_time: str) -> pd.DataFrame:
+    if not start_day:
+        return df
+
+    start_ts = pd.to_datetime(str(start_day), format="%Y%m%d", errors="coerce")
+    if pd.isna(start_ts):
+        return df
+
+    days = _parse_fetch_window(v_time)
+    if days <= 0:
+        return df
+
+    end_ts = start_ts + pd.Timedelta(days=days)
+    time_cols = [col for col in TIME_COLUMNS if col in df.columns]
+    if not time_cols:
+        return df
+
+    mask = pd.Series(False, index=df.index)
+    for col in time_cols:
+        values = df[col]
+        mask |= (values >= start_ts) & (values < end_ts)
+
+    if not mask.any():
+        return df
+
+    return df.loc[mask].copy()
+
+
+@st.cache_data(show_spinner=False)
+def fetch_bptc_dataframe(v_time: str = "7days", start_day: Optional[str] = None) -> pd.DataFrame:
+    """BPTC 텍스트 서블릿에서 테이블 전체를 크롤링."""
+
+    try:
+        df = collect_crawling_dataframe(
+            time=v_time,
+            route=BPTC_FORM_PAYLOAD.get("ROCD", "ALL"),
+            berth=BPTC_FORM_PAYLOAD.get("v_gu", "A"),
+            debug=False,
+        )
+    except Exception as exc:
+        print(f"⚠️ crawling 모듈 사용 실패, 기존 방식으로 재시도합니다: {exc}")
+        candidate = _fetch_dataframe_via_http(v_time, start_day)
+        df = candidate
+
+    df = normalize_column_names(df)
+    
     if "berth" in df.columns:
         df["berth"] = df["berth"].astype(str).str.extract(r"(\d+)").iloc[:, 0]
     if "berth" in df.columns:
@@ -209,6 +267,8 @@ def fetch_bptc_dataframe(v_time: str = "7days", start_day: Optional[str] = None)
         df["mooring_type"] = df["mooring_type"].fillna("").astype(str)
     if "berth" in df.columns:
         df["berth"] = df["berth"].astype(str)
+
+    df = _filter_by_window(df, start_day, v_time)
 
     try:
         vslmsg_df = fetch_vslmsg_dataframe()
