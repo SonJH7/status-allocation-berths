@@ -78,7 +78,9 @@ AXIS_BACKGROUND_COLOR = "#e5f3ff"
 
 BP_BASELINE_M = 1500.0
 BERTH_VERTICAL_SPAN_PX = 300.0
-BP_AXIS_STEP = 100.0
+
+QUARANTINE_MARKER_KEYS = ("quarantine_flag", "quarantine", "검역")
+PILOT_MARKER_KEYS = ("pilot_flag", "pilotage_flag", "pilotage", "pilot", "pilot_text", "도선")
 
 # ------------------------------------------------------------
 # 유틸리티 함수
@@ -460,7 +462,22 @@ def format_time_digits(value: object) -> str:
     ts = pd.to_datetime(value, errors="coerce")
     if pd.isna(ts):
         return ""
-    return f"{ts.strftime('%m%d')} {ts.strftime('%H%M')}"
+    return ts.strftime("%H")
+
+
+def extract_marker_label(row: pd.Series, keys: Iterable[str]) -> str:
+    for key in keys:
+        if key not in row.index:
+            continue
+        value = row.get(key)
+        if value is None:
+            continue
+        if isinstance(value, float) and pd.isna(value):
+            continue
+        text = str(value).strip()
+        if text and text.lower() != "nan":
+            return text
+    return ""
 
 
 def extract_meter_range(row: pd.Series) -> Tuple[Optional[float], Optional[float]]:
@@ -521,19 +538,9 @@ def compute_item_offset(row: pd.Series, item_height: float) -> float:
 
 
 def build_group_label(berth: int | str) -> str:
-    ticks: List[str] = []
-    current = BP_BASELINE_M
-    minimum = BP_BASELINE_M - BERTH_VERTICAL_SPAN_PX
-    while current >= minimum:
-        ticks.append(str(int(round(current))))
-        current -= BP_AXIS_STEP
-    if not ticks or ticks[-1] != str(int(round(minimum))):
-        ticks.append(str(int(round(minimum))))
-    axis_html = "".join(f"<span>{tick}</span>" for tick in ticks)
     return (
         "<div class='berth-label'>"
         f"<div class='berth-name'>{html.escape(str(berth))}</div>"
-        f"<div class='bp-axis'>{axis_html}</div>"
         "</div>"
     )
 
@@ -613,6 +620,9 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
     start_text = format_time_digits(row.get("eta"))
     end_text = format_time_digits(row.get("etd"))
 
+    quarantine_text = extract_marker_label(row, QUARANTINE_MARKER_KEYS)
+    pilot_text = extract_marker_label(row, PILOT_MARKER_KEYS)
+
     length_val = row.get("loa_m") if not pd.isna(row.get("loa_m")) else row.get("length_m")
     length_text = ""
     if length_val is not None and not pd.isna(length_val):
@@ -632,14 +642,27 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
     chip_html = ""
     if length_text:
         chip_body = length_text if not bp_text else f"{length_text} · {bp_text}"
-        chip_html = f"<div class='length-chip'>{chip_body}</div>"
+        chip_html = f"<div class='length-chip'>{html.escape(chip_body)}</div>"
+
+    marker_top_html = (
+        f"<div class='marker-text top'>{html.escape(quarantine_text)}</div>"
+        if quarantine_text
+        else ""
+    )
+    marker_bottom_html = (
+        f"<div class='marker-text bottom'>{html.escape(pilot_text)}</div>"
+        if pilot_text
+        else ""
+    )
+
+    vessel_html = html.escape(vessel)
 
     html = f"""
     <div class='berth-item-card'>
         <div class='time-row'><span>{start_text}</span><span>{end_text}</span></div>
-        <div class='marker-text top'>검역</div>
-        <div class='vessel-name'>{vessel}</div>
-        <div class='marker-text bottom'>도선</div>
+        {marker_top_html}
+        <div class='vessel-name'>{vessel_html}</div>
+        {marker_bottom_html}
         {chip_html}
     </div>
     """
