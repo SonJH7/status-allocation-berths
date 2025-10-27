@@ -2,6 +2,7 @@
 # Streamlit + vis.js 타임라인 기반 BPTC 선석 현황 보드
 from __future__ import annotations
 
+import html
 import io
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -74,6 +75,10 @@ DEFAULT_COLOR_SEQUENCE = [
 ]
 
 AXIS_BACKGROUND_COLOR = "#e5f3ff"
+
+BP_BASELINE_M = 1500.0
+BERTH_VERTICAL_SPAN_PX = 300.0
+BP_AXIS_STEP = 100.0
 
 # ------------------------------------------------------------
 # 유틸리티 함수
@@ -322,14 +327,43 @@ def ensure_timeline_css() -> None:
             font-weight: 600;
             font-size: 14px;
             color: #163a59;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
         }}
         .vis-labelset .vis-label {{
-            padding-left: 52px;
+            padding-left: 68px;
         }}
+        .berth-label {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            align-items: flex-start;
+        }
+        .berth-label .berth-name {
+            font-weight: 700;
+            font-size: 15px;
+            color: #0f2d4c;
+        }
+        .berth-label .bp-axis {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            font-size: 11px;
+            color: #4b5563;
+            line-height: 1.1;
+        }
+        .berth-label .bp-axis span:first-child {
+            color: #1f2937;
+            font-weight: 700;
+        }
         .vis-timeline .vis-item.berth-item {{
             border-radius: 12px;
             border: 2px solid rgba(15, 45, 76, 0.2);
             overflow: visible;
+        }}
+        .vis-timeline .vis-item.berth-item.bp-aligned {{
+            transition: transform 0.25s ease, margin-top 0.25s ease;
         }}
         .vis-timeline .vis-item.berth-item .vis-item-content {{
             padding: 0 !important;
@@ -425,7 +459,33 @@ def format_time_digits(value: object) -> str:
     return f"{ts.strftime('%m%d')} {ts.strftime('%H%M')}"
 
 
+def extract_meter_range(row: pd.Series) -> Tuple[Optional[float], Optional[float]]:
+    start = row.get("start_meter")
+    end = row.get("end_meter")
+
+    if start is None or pd.isna(start):
+        start = row.get("f_pos")
+    if end is None or pd.isna(end):
+        end = row.get("e_pos")
+
+    def _to_float(value) -> Optional[float]:
+        if value is None or pd.isna(value):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    return _to_float(start), _to_float(end)
+
+
 def compute_item_height(row: pd.Series) -> float:
+    start_meter, end_meter = extract_meter_range(row)
+    if start_meter is not None and end_meter is not None:
+        span = abs(end_meter - start_meter)
+        if span > 0:
+            return float(max(24.0, min(BERTH_VERTICAL_SPAN_PX, span)))
+
     length_val = row.get("loa_m")
     if length_val is None or pd.isna(length_val):
         length_val = row.get("length_m")
@@ -436,7 +496,42 @@ def compute_item_height(row: pd.Series) -> float:
 
     if numeric is None or pd.isna(numeric):
         return 86.0
-    return max(72.0, min(180.0, 44.0 + numeric * 0.35))
+    scaled = numeric
+    return float(max(24.0, min(BERTH_VERTICAL_SPAN_PX, scaled)))
+
+
+def compute_item_offset(row: pd.Series, item_height: float) -> float:
+    start_meter, end_meter = extract_meter_range(row)
+    anchor = start_meter if start_meter is not None else end_meter
+    if anchor is None:
+        return 0.0
+
+    offset = BP_BASELINE_M - anchor
+    if offset < 0:
+        offset = 0.0
+
+    max_offset = max(0.0, BERTH_VERTICAL_SPAN_PX - item_height)
+    if offset > max_offset:
+        offset = max_offset
+    return float(offset)
+
+
+def build_group_label(berth: int | str) -> str:
+    ticks: List[str] = []
+    current = BP_BASELINE_M
+    minimum = BP_BASELINE_M - BERTH_VERTICAL_SPAN_PX
+    while current >= minimum:
+        ticks.append(str(int(round(current))))
+        current -= BP_AXIS_STEP
+    if not ticks or ticks[-1] != str(int(round(minimum))):
+        ticks.append(str(int(round(minimum))))
+    axis_html = "".join(f"<span>{tick}</span>" for tick in ticks)
+    return (
+        "<div class='berth-label'>"
+        f"<div class='berth-name'>{html.escape(str(berth))}</div>"
+        f"<div class='bp-axis'>{axis_html}</div>"
+        "</div>"
+    )
 
 
 def collect_spacing_conflicts(
@@ -628,7 +723,8 @@ def render_berth_gantt(
 
     base_ts = pd.Timestamp(base_date)
     view_start = base_ts.normalize() - pd.Timedelta(days=1)
-    view_end = base_ts.normalize() + pd.Timedelta(days=days)
+    forward_days = max(1, days - 2)
+    view_end = base_ts.normalize() + pd.Timedelta(days=forward_days)
 
     berth_min, berth_max = berth_range
     allowed_berths = {str(b) for b in range(berth_min, berth_max + 1)}
@@ -685,7 +781,7 @@ def render_berth_gantt(
         )
 
     groups = [
-        {"id": str(berth), "content": str(berth)}
+        {"id": str(berth), "content": build_group_label(berth)}
         for berth in range(berth_min, berth_max + 1)
     ]
 
@@ -702,7 +798,9 @@ def render_berth_gantt(
         id_to_index[item_id] = idx
 
         height_px = compute_item_height(row)
-        item_class = "berth-item gap-warning" if bool(gap_flags_map.get(idx, False)) else "berth-item"
+        offset_px = compute_item_offset(row, height_px)
+        base_class = "berth-item gap-warning" if bool(gap_flags_map.get(idx, False)) else "berth-item"
+        item_class = f"{base_class} bp-aligned"
         items.append(
             {
                 "id": item_id,
@@ -711,7 +809,11 @@ def render_berth_gantt(
                 "end": end,
                 "content": content_html,
                 "title": tooltip,
-                "style": f"background-color: {resolve_background_color(row)}; height: {height_px}px;",
+                "style": (
+                    f"background-color: {resolve_background_color(row)};"
+                    f" height: {height_px}px;"
+                    f" margin-top: {offset_px}px;"
+                ),
                 "className": item_class,
                 "type": "range",
                 "data": row_to_jsonable(row),
@@ -719,7 +821,7 @@ def render_berth_gantt(
         )
 
     options = {
-        "stack": True,
+        "stack": False,
         "editable": {
             "updateTime": True,
             "updateGroup": True,
@@ -731,10 +833,10 @@ def render_berth_gantt(
         "groupEditable": False,
         "min": view_start.isoformat(),
         "max": view_end.isoformat(),
-        "start": base_ts.isoformat(),
-        "end": (base_ts + pd.Timedelta(days=days)).isoformat(),
+        "start": view_start.isoformat(),
+        "end": view_end.isoformat(),
         "orientation": {"axis": "top"},
-        "margin": {"item": 12, "axis": 12},
+        "margin": {"item": 8, "axis": 12},
         "multiselect": False,
         "moveable": True,
         "zoomable": True,
@@ -745,6 +847,8 @@ def render_berth_gantt(
         "horizontalScroll": True,
         "timeAxis": {"scale": "day", "step": 1},
         "locale": "ko",
+        "groupHeightMode": "fixed",
+        "groupHeight": BERTH_VERTICAL_SPAN_PX,
     }
 
     event_result = st_timeline(items, groups, options, height=height, key=key)
@@ -988,7 +1092,7 @@ with st.sidebar:
     st.markdown("---")
     today = datetime.today()
     default_start = today - timedelta(days=1)
-    default_end = today + timedelta(days=6)
+    default_end = today + timedelta(days=5)
     date_start = st.date_input("조회 시작일", value=default_start.date())
     date_end = st.date_input("조회 종료일", value=default_end.date())
     operator_filter = st.text_input("선사 필터", value="")
@@ -1045,7 +1149,11 @@ filtered_df = apply_filters(
 if filtered_df.empty:
     st.warning("필터 조건에 해당하는 데이터가 없습니다.")
 else:
-    base_date = datetime.combine(date_start, datetime.min.time()) if date_start else datetime.today()
+    base_date = (
+        datetime.combine(date_start, datetime.min.time()) + timedelta(days=1)
+        if date_start
+        else datetime.today()
+    )
 
     tabs = st.tabs(["신선대(1~5선석)", "감만(6~9선석)"])
 
