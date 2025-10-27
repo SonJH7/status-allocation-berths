@@ -715,6 +715,8 @@ def render_berth_gantt(
     editable: bool = True,
     snap_choice: str = "1h",
     berth_range: Tuple[int, int] = (1, 5),
+    berth_whitelist: Optional[Iterable[str]] = None,
+    group_label_map: Optional[Dict[str, str]] = None,
     height: str = "820px",
     key: str = "gantt",
 ) -> Tuple[pd.DataFrame, Optional[Dict]]:
@@ -731,8 +733,19 @@ def render_berth_gantt(
     view_start = base_ts.normalize() - pd.Timedelta(days=1)
     view_end = view_start + pd.Timedelta(days=days) - pd.Timedelta(milliseconds=1)
 
+    if "berth" not in prepared.columns:
+        st.warning("선석 정보가 없어 간트 차트를 표시할 수 없습니다.")
+        return prepared, None
+
+    prepared["berth"] = prepared["berth"].astype(str)
+
     berth_min, berth_max = berth_range
-    allowed_berths = {str(b) for b in range(berth_min, berth_max + 1)}
+    if berth_whitelist is not None:
+        berth_order = [str(b) for b in berth_whitelist]
+    else:
+        berth_order = [str(b) for b in range(berth_min, berth_max + 1)]
+
+    allowed_berths = set(berth_order)
 
     mask = (
         prepared["etd"].notna()
@@ -785,17 +798,24 @@ def render_berth_gantt(
             icon="⚠️",
         )
 
-    groups = [
-        {
-            "id": str(berth),
-            "content": build_group_label(berth),
-            "style": (
-                f"height: {BERTH_VERTICAL_SPAN_PX}px; "
-                f"line-height: {BERTH_VERTICAL_SPAN_PX}px;"
-            ),
-        }
-        for berth in range(berth_min, berth_max + 1)
-    ]
+    groups = []
+    for berth in berth_order:
+        label_value = (
+            group_label_map.get(str(berth))
+            if group_label_map is not None
+            else None
+        )
+        display_label = label_value if label_value else berth
+        groups.append(
+            {
+                "id": str(berth),
+                "content": build_group_label(display_label),
+                "style": (
+                    f"height: {BERTH_VERTICAL_SPAN_PX}px; "
+                    f"line-height: {BERTH_VERTICAL_SPAN_PX}px;"
+                ),
+            }
+        )
 
     items = []
     id_to_index: Dict[str, object] = {}
@@ -1261,13 +1281,25 @@ else:
             )
 
     with tabs[1]:
+        df_for_gantt = filtered_df.copy()
+        berth_label_pairs: List[Tuple[str, str]] = [
+            ("9", "9(1)"),
+            ("8", "8(2)"),
+            ("7", "7(3)"),
+            ("6", "6(4)"),
+        ]
+        berth_order = [pair[0] for pair in berth_label_pairs]
+        berth_label_map = dict(berth_label_pairs)
+
         updated_df, event_payload = render_berth_gantt(
-            filtered_df,
+            df_for_gantt,
             base_date=base_date,
             days=timeline_days,
             editable=True,
             snap_choice=snap_choice,
             berth_range=(6, 9),
+            berth_whitelist=berth_order,
+            group_label_map=berth_label_map,
             height="820px",
             key="gamman",
         )
