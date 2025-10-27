@@ -16,13 +16,14 @@ from streamlit_timeline import st_timeline
 from bptc_vslmsg import fetch_bptc_g_vslmsg
 
 import numpy as np
+from db import SessionLocal, get_vessel_loa_map
 
 # ------------------------------------------------------------
 # 상수 정의
 # ------------------------------------------------------------
 BPTC_ENDPOINT = "https://info.bptc.co.kr/Berth_status_text_servlet_sw_kr"
 BPTC_FORM_PAYLOAD = {
-    "v_time": "3days",
+    "v_time": "7days",
     "ROCD": "ALL",
     "ORDER": "item3",
     "v_gu": "A",
@@ -88,6 +89,7 @@ REFERENCE_STATUS_COLOR_MAP = {
 REFERENCE_COLUMN_CANDIDATES = ("참고", "reference", "remarks", "remark")
 
 AXIS_BACKGROUND_COLOR = "#e5f3ff"
+DEFAULT_BERTH_LENGTH_M = 300.0
 
 BP_BASELINE_M = 1500.0
 BERTH_VERTICAL_SPAN_PX = 300.0
@@ -798,6 +800,7 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
         if editable
         else False,
         "groupEditable": False,
+        "groupHeightMode": "fitItems",
         "min": view_start.isoformat(),
         "max": view_end.isoformat(),
         "orientation": {"axis": "top"},
@@ -827,7 +830,8 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if "bitt" in work.columns:
         work["bitt"] = work["bitt"].astype(str)
     if "berth" in work.columns:
-        work["berth"] = work["berth"].astype(str)
+        work["berth"] = work["berth"].apply(normalize_berth_code)
+    work = attach_vessel_loa(work)
     return work
 
 
@@ -958,6 +962,13 @@ def render_berth_gantt(
         content_html, tooltip = build_item_html(row)
         item_id = str(idx)
         id_to_index[item_id] = idx
+        item_height = compute_item_height(row)
+        color = resolve_background_color(row)
+        style = (
+            f"background-color: {color};"
+            f"height: {item_height:.1f}px;"
+            f"min-height: {item_height:.1f}px;"
+        )
 
         height_px = compute_item_height(row)
         offset_px = compute_item_offset(row, height_px)
@@ -1077,7 +1088,13 @@ def render_berth_gantt(
         },
     }
 
-    event_result = st_timeline(items, groups, options, height=height, key=key)
+    if height:
+        effective_height = height
+    else:
+        row_count = max(len(groups), 1)
+        effective_height = f"{max(360, int(row_count * 110))}px"
+
+    event_result = st_timeline(items, groups, options, height=effective_height, key=key)
 
     updated = prepared.copy()
     event_payload: Optional[Dict] = None
@@ -1407,7 +1424,7 @@ else:
             editable=True,
             snap_choice=snap_choice,
             berth_range=(1, 5),
-            height="820px",
+            height=None,
             key="sinsundae",
         )
         if event_payload:
