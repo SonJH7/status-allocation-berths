@@ -3,34 +3,26 @@
 from __future__ import annotations
 
 import html
-import io
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
-import requests
 import streamlit as st
-from bs4 import BeautifulSoup
 from streamlit_timeline import st_timeline
 
 from bptc_vslmsg import fetch_bptc_g_vslmsg
+from crawler import fetch_bptc_t
 
 import numpy as np
 
 # ------------------------------------------------------------
 # 상수 정의
 # ------------------------------------------------------------
-BPTC_ENDPOINT = "https://info.bptc.co.kr/Berth_status_text_servlet_sw_kr"
 BPTC_FORM_PAYLOAD = {
     "v_time": "3days",
     "ROCD": "ALL",
     "ORDER": "item3",
     "v_gu": "A",
-}
-HTTP_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Referer": "https://info.bptc.co.kr/content/sw/frame/berth_status_text_frame_sw_kr.jsp",
 }
 
 COLUMN_RENAME_MAP = {
@@ -51,10 +43,24 @@ COLUMN_RENAME_MAP = {
     "전배": "transfer_qty",
     "항로": "route",
     "검역": "quarantine_flag",
+    "Length(m)": "length_m",
+    "Beam(m)": "beam_m",
+    "f": "f_pos",
+    "e": "e_pos",
 }
 
 TIME_COLUMNS = ["eta_plan", "eta", "work_complete", "etd", "inbound_cutoff"]
-NUMERIC_COLUMNS = ["discharge_qty", "load_qty", "sh_qty", "transfer_qty"]
+NUMERIC_COLUMNS = [
+    "discharge_qty",
+    "load_qty",
+    "sh_qty",
+    "transfer_qty",
+    "length_m",
+    "beam_m",
+    "bp",
+    "f_pos",
+    "e_pos",
+]
 
 PASTEL_COLORS = {
     "gray": "#d9d9d9",
@@ -159,29 +165,22 @@ def row_to_jsonable(row: pd.Series) -> Dict[str, Any]:
 
 @st.cache_data(show_spinner=False)
 def fetch_bptc_dataframe() -> pd.DataFrame:
-    """BPTC 텍스트 서블릿에서 테이블 전체를 크롤링."""
+    """crawling 패키지 기반 데이터프레임을 정규화하여 반환."""
 
-    response = requests.post(
-        BPTC_ENDPOINT,
-        data=BPTC_FORM_PAYLOAD,
-        headers=HTTP_HEADERS,
-        timeout=20,
+    df = fetch_bptc_t(
+        v_time=BPTC_FORM_PAYLOAD.get("v_time", "3days"),
+        route=BPTC_FORM_PAYLOAD.get("ROCD", "ALL"),
+        order=BPTC_FORM_PAYLOAD.get("ORDER", "item3"),
+        berth_group=BPTC_FORM_PAYLOAD.get("v_gu", "A"),
     )
-    response.encoding = "euc-kr"
-    if response.status_code != 200:
-        raise RuntimeError(f"BPTC 요청 실패: {response.status_code}")
 
-    soup = BeautifulSoup(response.text, "lxml")
-    tables = pd.read_html(io.StringIO(str(soup)), flavor="lxml")
-    if not tables:
-        raise RuntimeError("테이블을 찾을 수 없습니다.")
+    if df.empty:
+        return df
 
-    candidate = max(tables, key=lambda tbl: tbl.shape[1])
-    df = normalize_column_names(candidate)
+    df = normalize_column_names(df)
 
     if "berth" in df.columns:
         df["berth"] = df["berth"].astype(str).str.extract(r"(\d+)").iloc[:, 0]
-    if "berth" in df.columns:
         df = df[~df["berth"].isna()].copy()
 
     for col in TIME_COLUMNS:
@@ -198,38 +197,60 @@ def fetch_bptc_dataframe() -> pd.DataFrame:
     if "berth" in df.columns:
         df["berth"] = df["berth"].astype(str)
 
-    try:
-        vslmsg_df = fetch_vslmsg_dataframe()
-    except Exception as exc:
-        print(f"⚠️ VslMsg 데이터 병합 실패: {exc}")
-        vslmsg_df = pd.DataFrame()
+    if "bp_raw" in df.columns and "bitt" not in df.columns:
+        df["bitt"] = df["bp_raw"]
+    if "bitt" in df.columns:
+        df["bitt"] = df["bitt"].astype(str)
+    if "bp_raw" in df.columns:
+        df["bp_raw"] = df["bp_raw"].astype(str)
 
-    if not vslmsg_df.empty:
-        vslmsg_df = vslmsg_df.copy()
-        vslmsg_df["start_meter"] = vslmsg_df[["f_pos", "e_pos"]].min(axis=1)
-        vslmsg_df["end_meter"] = vslmsg_df[["f_pos", "e_pos"]].max(axis=1)
-        merge_keys = [key for key in ("voyage", "vessel") if key in df.columns and key in vslmsg_df.columns]
-        if not merge_keys:
-            merge_keys = ["vessel"]
-        vslmsg_compact = vslmsg_df.drop_duplicates(subset=merge_keys)
-        extra_cols = [
-            col
-            for col in ["bitt", "bp_raw", "f_pos", "e_pos", "length_m", "start_meter", "end_meter"]
-            if col in vslmsg_compact.columns
-        ]
-        df = df.merge(vslmsg_compact[merge_keys + extra_cols], on=merge_keys, how="left")
+    needs_vslmsg = False
+    if "f_pos" not in df.columns or df["f_pos"].isna().all():
+        needs_vslmsg = True
+    if "e_pos" not in df.columns or df["e_pos"].isna().all():
+        needs_vslmsg = True
+    if "bitt" not in df.columns or df["bitt"].replace("", pd.NA).isna().all():
+        needs_vslmsg = True
 
-        missing_mask = df.get("length_m").isna() if "length_m" in df.columns else pd.Series(False, index=df.index)
-        if missing_mask.any():
-            fallback = vslmsg_df.dropna(subset=["length_m"]).drop_duplicates(subset=["vessel"])
-            fallback = fallback.set_index("vessel")
-            for col in ["bitt", "bp_raw", "f_pos", "e_pos", "length_m", "start_meter", "end_meter"]:
-                if col not in df.columns:
-                    df[col] = None
-                if col in fallback.columns:
-                    df.loc[missing_mask, col] = df.loc[missing_mask, "vessel"].map(fallback[col])
+    if needs_vslmsg:
+        try:
+            vslmsg_df = fetch_vslmsg_dataframe()
+        except Exception as exc:
+            print(f"⚠️ VslMsg 데이터 병합 실패: {exc}")
+            vslmsg_df = pd.DataFrame()
 
-    if "start_meter" not in df.columns and {"f_pos", "e_pos"}.issubset(df.columns):
+        if not vslmsg_df.empty:
+            vslmsg_df = vslmsg_df.copy()
+            vslmsg_df["start_meter"] = vslmsg_df[["f_pos", "e_pos"]].min(axis=1)
+            vslmsg_df["end_meter"] = vslmsg_df[["f_pos", "e_pos"]].max(axis=1)
+            merge_keys = [key for key in ("voyage", "vessel") if key in df.columns and key in vslmsg_df.columns]
+            if not merge_keys:
+                merge_keys = ["vessel"]
+            vslmsg_compact = vslmsg_df.drop_duplicates(subset=merge_keys)
+            extra_cols = [
+                col
+                for col in ["bitt", "bp_raw", "f_pos", "e_pos", "length_m", "start_meter", "end_meter"]
+                if col in vslmsg_compact.columns
+            ]
+            merged = df.merge(
+                vslmsg_compact[merge_keys + extra_cols],
+                on=merge_keys,
+                how="left",
+                suffixes=("", "_vslmsg"),
+            )
+
+            for col in extra_cols:
+                fallback_col = f"{col}_vslmsg"
+                if fallback_col not in merged.columns:
+                    continue
+                if col in merged.columns:
+                    merged[col] = merged[col].combine_first(merged[fallback_col])
+                else:
+                    merged[col] = merged[fallback_col]
+                merged = merged.drop(columns=[fallback_col])
+            df = merged
+
+    if {"f_pos", "e_pos"}.issubset(df.columns):
         df["start_meter"] = df[["f_pos", "e_pos"]].min(axis=1)
         df["end_meter"] = df[["f_pos", "e_pos"]].max(axis=1)
 
