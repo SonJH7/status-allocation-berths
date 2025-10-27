@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import html
 import io
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
@@ -16,14 +16,15 @@ from streamlit_timeline import st_timeline
 from bptc_vslmsg import fetch_bptc_g_vslmsg
 
 import numpy as np
-from db import SessionLocal, get_vessel_loa_map
+from sqlalchemy.exc import SQLAlchemyError
+
+from db import SessionLocal, get_vessel_loa_map, _normalize_berth_code as normalize_berth_code
 
 # ------------------------------------------------------------
 # 상수 정의
 # ------------------------------------------------------------
 BPTC_ENDPOINT = "https://info.bptc.co.kr/Berth_status_text_servlet_sw_kr"
 BPTC_FORM_PAYLOAD = {
-    "v_time": "7days",
     "ROCD": "ALL",
     "ORDER": "item3",
     "v_gu": "A",
@@ -96,6 +97,8 @@ BERTH_VERTICAL_SPAN_PX = 300.0
 QUARANTINE_MARKER_KEYS = ("quarantine_flag", "quarantine", "검역")
 PILOT_MARKER_KEYS = ("pilot_flag", "pilotage_flag", "pilotage", "pilot", "pilot_text", "도선")
 
+MAX_FETCH_DAYS = 31
+
 # ------------------------------------------------------------
 # 유틸리티 함수
 # ------------------------------------------------------------
@@ -160,12 +163,19 @@ def row_to_jsonable(row: pd.Series) -> Dict[str, Any]:
 
 
 @st.cache_data(show_spinner=False)
-def fetch_bptc_dataframe() -> pd.DataFrame:
+def fetch_bptc_dataframe(v_time: str = "7days", start_day: Optional[str] = None) -> pd.DataFrame:
     """BPTC 텍스트 서블릿에서 테이블 전체를 크롤링."""
+
+    form_payload = dict(BPTC_FORM_PAYLOAD)
+    form_payload["v_time"] = v_time
+    if start_day:
+        normalized = str(start_day).replace("-", "")
+        form_payload["v_day"] = normalized
+        form_payload["v_date"] = normalized
 
     response = requests.post(
         BPTC_ENDPOINT,
-        data=BPTC_FORM_PAYLOAD,
+        data=form_payload,
         headers=HTTP_HEADERS,
         timeout=20,
     )
@@ -239,6 +249,45 @@ def fetch_bptc_dataframe() -> pd.DataFrame:
         df["loa_m"] = df["length_m"]
 
     return df
+
+
+def attach_vessel_loa(df: pd.DataFrame) -> pd.DataFrame:
+    """데이터프레임에 선박 LOA 정보를 결합한다."""
+
+    if df is None or df.empty or "vessel" not in df.columns:
+        return df
+
+    vessels = (
+        df["vessel"].dropna().astype(str).str.strip()
+    )
+    vessels = vessels[vessels != ""]
+    if vessels.empty:
+        return df
+
+    session = SessionLocal()
+    try:
+        loa_map = get_vessel_loa_map(session, vessels.unique())
+    except SQLAlchemyError as exc:
+        session.rollback()
+        print(f"⚠️ LOA 조회 실패: {exc}")
+        return df
+    finally:
+        session.close()
+
+    if not loa_map:
+        return df
+
+    enriched = df.copy()
+    vessel_key = enriched["vessel"].astype(str).str.strip()
+    loa_series = vessel_key.map(loa_map)
+
+    if "loa_m" in enriched.columns:
+        missing_mask = enriched["loa_m"].isna()
+        enriched.loc[missing_mask, "loa_m"] = loa_series[missing_mask]
+    else:
+        enriched["loa_m"] = loa_series
+
+    return enriched
 
 
 @st.cache_data(show_spinner=False)
@@ -740,7 +789,7 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
 
     vessel_html = html.escape(vessel)
 
-    html = f"""
+    card_html = f"""
     <div class='berth-item-card'>
         <div class='time-row'><span>{start_text}</span><span>{end_text}</span></div>
         {marker_top_html}
@@ -787,7 +836,7 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
         )
 
     tooltip = "<br/>".join([part for part in tooltip_parts if part])
-    return html, tooltip
+    return card_html, tooltip
 
     options = {
         "stack": False,
@@ -1306,19 +1355,67 @@ def compute_diff(original: pd.DataFrame, current: pd.DataFrame) -> pd.DataFrame:
     return diff_df
 
 
+def calculate_fetch_window(
+    date_start: date,
+    date_end: date,
+    *,
+    today: Optional[date] = None,
+    max_days: Optional[int] = MAX_FETCH_DAYS,
+) -> Tuple[date, str, str, str]:
+    today = today or datetime.today().date()
+    if date_end < date_start:
+        date_end = date_start
+
+    range_days = max((date_end - date_start).days + 1, 1)
+    lookback_days = max((today - date_start).days, 0)
+    forward_days = max((date_end - today).days, 0)
+    fetch_days = max(range_days, lookback_days + forward_days + 1)
+
+    if max_days is not None:
+        fetch_days = min(fetch_days, max_days)
+
+    start_key = date_start.strftime("%Y%m%d")
+    end_key = date_end.strftime("%Y%m%d")
+    return date_end, start_key, end_key, f"{fetch_days}days"
+
+
 # ------------------------------------------------------------
 # Streamlit 애플리케이션 본문
 # ------------------------------------------------------------
 st.set_page_config(page_title="BPTC 선석 Gantt", layout="wide")
 st.title("BPTC 선석 현황 Gantt")
 
+now = datetime.now()
+today_date = now.date()
+default_start_date = today_date - timedelta(days=1)
+default_end_date = today_date + timedelta(days=5)
+_, default_start_key, default_end_key, default_v_time = calculate_fetch_window(
+    default_start_date,
+    default_end_date,
+    today=today_date,
+)
+
+if "data_fetch_params" not in st.session_state:
+    st.session_state["data_fetch_params"] = None
+if "failed_fetch_params" not in st.session_state:
+    st.session_state["failed_fetch_params"] = None
+
 if "raw_df" not in st.session_state:
     try:
-        initial_df = fetch_bptc_dataframe()
+        initial_df = fetch_bptc_dataframe(
+            v_time=default_v_time,
+            start_day=default_start_key,
+        )
         st.session_state["raw_df"] = initial_df.copy()
         st.session_state["working_df"] = initial_df.copy()
         st.session_state["last_updated"] = datetime.now()
         st.session_state["history"] = []
+        st.session_state["data_fetch_params"] = (
+            default_start_key,
+            default_end_key,
+            default_v_time,
+        )
+        st.session_state["failed_fetch_params"] = None
     except Exception:
         demo_df = get_demo_df()
         st.session_state["raw_df"] = demo_df.copy()
@@ -1326,37 +1423,78 @@ if "raw_df" not in st.session_state:
         st.session_state["last_updated"] = datetime.now()
         st.session_state["history"] = []
         st.warning("실제 데이터를 불러오지 못해 데모 데이터를 사용합니다.")
+        st.session_state["data_fetch_params"] = None
+        st.session_state["failed_fetch_params"] = (
+            default_start_key,
+            default_end_key,
+            default_v_time,
+        )
 
 with st.sidebar:
     st.markdown("### 데이터 로드")
-    if st.button("📡 BPTC 크롤링 새로고침", use_container_width=True):
+    st.markdown("---")
+    date_start = st.date_input("조회 시작일", value=default_start_date)
+    date_end = st.date_input("조회 종료일", value=default_end_date)
+    if date_end < date_start:
+        st.warning("조회 종료일은 조회 시작일보다 빠를 수 없어 시작일로 조정됩니다.")
+    adjusted_end, start_key, end_key, fetch_v_time = calculate_fetch_window(
+        date_start,
+        date_end,
+        today=today_date,
+    )
+    date_end = adjusted_end
+    current_fetch_params = (start_key, end_key, fetch_v_time)
+
+    def reload_data(show_success: bool = False) -> bool:
         try:
-            fetched = fetch_bptc_dataframe()
-            st.session_state["raw_df"] = fetched.copy()
-            st.session_state["working_df"] = fetched.copy()
-            st.session_state["last_updated"] = datetime.now()
-            st.session_state["history"] = []
-            st.success("데이터를 갱신했습니다.")
+            fetched = fetch_bptc_dataframe(
+                v_time=fetch_v_time,
+                start_day=start_key,
+            )
         except Exception as exc:
             st.error(f"크롤링 실패: {exc}")
-            if st.button("데모 데이터로 대체", key="demo_replace"):
-                demo_df = get_demo_df()
-                st.session_state["raw_df"] = demo_df.copy()
-                st.session_state["working_df"] = demo_df.copy()
-                st.session_state["last_updated"] = datetime.now()
-                st.session_state["history"] = []
+            return False
 
-    st.markdown("---")
-    today = datetime.today()
-    default_start = today - timedelta(days=1)
-    default_end = today + timedelta(days=5)
-    date_start = st.date_input("조회 시작일", value=default_start.date())
-    date_end = st.date_input("조회 종료일", value=default_end.date())
+        st.session_state["raw_df"] = fetched.copy()
+        st.session_state["working_df"] = fetched.copy()
+        st.session_state["last_updated"] = datetime.now()
+        st.session_state["history"] = []
+        st.session_state["data_fetch_params"] = current_fetch_params
+        st.session_state["failed_fetch_params"] = None
+        if show_success:
+            st.success("데이터를 갱신했습니다.")
+        return True
+
+    if st.button("📡 BPTC 크롤링 새로고침", use_container_width=True):
+        with st.spinner("조회 기간에 맞춰 데이터를 불러오는 중..."):
+            st.session_state["failed_fetch_params"] = None
+            if not reload_data(show_success=True):
+                st.session_state["failed_fetch_params"] = current_fetch_params
+
+    if st.button("데모 데이터로 대체", key="demo_replace", use_container_width=True):
+        demo_df = get_demo_df()
+        st.session_state["raw_df"] = demo_df.copy()
+        st.session_state["working_df"] = demo_df.copy()
+        st.session_state["last_updated"] = datetime.now()
+        st.session_state["history"] = []
+        st.session_state["data_fetch_params"] = current_fetch_params
+        st.session_state["failed_fetch_params"] = current_fetch_params
+        st.success("데모 데이터를 불러왔습니다.")
+
     operator_filter = st.text_input("선사 필터", value="")
     route_filter = st.text_input("항로 필터", value="")
     snap_choice = st.radio("시간 스냅", ["1h", "30m", "15m"], index=0, horizontal=True)
     timeline_days = st.slider("타임라인 표시 기간(일)", min_value=3, max_value=14, value=7, step=1)
 
+    last_params = st.session_state.get("data_fetch_params")
+    failed_params = st.session_state.get("failed_fetch_params")
+    if last_params != current_fetch_params and failed_params != current_fetch_params:
+        with st.spinner("조회 기간에 맞춰 데이터를 불러오는 중..."):
+            if not reload_data(show_success=False):
+                st.session_state["failed_fetch_params"] = current_fetch_params
+
+    st.markdown("---")
+    
     if st.button("↩ 되돌리기", use_container_width=True):
         history: List[pd.DataFrame] = st.session_state.get("history", [])
         if history:
