@@ -7,7 +7,7 @@ from __future__ import annotations
 import ast
 import html
 import json
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -24,6 +24,156 @@ PALETTE: Dict[str, str] = {
     "pink": "#f8d3f1",
     "beige": "#ffe3a3",
 }
+
+BP_BASELINE_M = 1500.0
+BERTH_VERTICAL_SPAN_PX = 300.0
+BERTH_METER_RANGES: Dict[str, Tuple[float, float]] = {
+    "1": (0.0, 300.0),
+    "2": (301.0, 600.0),
+    "3": (601.0, 900.0),
+    "4": (901.0, 1200.0),
+    "5": (1200.0, 1500.0),
+}
+
+
+def get_berth_meter_range(berth_value: object) -> Optional[Tuple[float, float]]:
+    if berth_value is None or pd.isna(berth_value):
+        return None
+    key = str(berth_value).strip()
+    if not key:
+        return None
+    return BERTH_METER_RANGES.get(key)
+
+
+def extract_meter_range(row: pd.Series) -> Tuple[Optional[float], Optional[float]]:
+    def _to_float(value) -> Optional[float]:
+        if value is None or pd.isna(value):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    values: List[float] = []
+    for key in ("start_meter", "end_meter", "f_pos", "e_pos"):
+        converted = _to_float(row.get(key))
+        if converted is not None:
+            values.append(converted)
+
+    if not values:
+        return None, None
+
+    lower = min(values)
+    upper = max(values)
+    return lower, upper
+
+
+def resolve_berth_span(row: pd.Series) -> Optional[float]:
+    berth_range = get_berth_meter_range(row.get("berth"))
+    if berth_range is None:
+        return None
+    start, end = berth_range
+    if start is None or end is None:
+        return None
+    span = float(end - start)
+    if span <= 0:
+        return None
+    return span
+
+
+def compute_item_height(row: pd.Series) -> float:
+    berth_span = resolve_berth_span(row)
+    max_height = berth_span if berth_span is not None else BERTH_VERTICAL_SPAN_PX
+    start_meter, end_meter = extract_meter_range(row)
+    if start_meter is not None and end_meter is not None:
+        lower = float(min(start_meter, end_meter))
+        upper = float(max(start_meter, end_meter))
+        span = upper - lower
+        if span > 0:
+            if berth_span is not None:
+                span = min(span, berth_span)
+            return float(max(24.0, min(max_height, span)))
+
+    length_val = row.get("loa_m")
+    if length_val is None or pd.isna(length_val):
+        length_val = row.get("length_m")
+    try:
+        numeric = float(length_val)
+    except (TypeError, ValueError):
+        numeric = None
+
+    if numeric is None or pd.isna(numeric):
+        return 86.0
+    scaled = numeric
+    return float(max(24.0, min(max_height, scaled)))
+
+
+def compute_item_offset(row: pd.Series, item_height: float) -> float:
+    def _to_float(value) -> Optional[float]:
+        if value is None or pd.isna(value):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    start_meter, end_meter = extract_meter_range(row)
+    berth_range = get_berth_meter_range(row.get("berth"))
+
+    if (
+        berth_range is not None
+        and berth_range[0] is not None
+        and berth_range[1] is not None
+        and berth_range[1] > berth_range[0]
+    ):
+        berth_start = float(berth_range[0])
+        berth_end = float(berth_range[1])
+        berth_span = berth_end - berth_start
+
+        top_anchor = _to_float(start_meter)
+        bottom_anchor = _to_float(end_meter)
+        if top_anchor is None and bottom_anchor is not None:
+            top_anchor = bottom_anchor
+        if top_anchor is None:
+            anchor_candidates: List[float] = []
+            for key in ("f_pos", "e_pos"):
+                converted = _to_float(row.get(key))
+                if converted is not None:
+                    anchor_candidates.append(converted)
+            if anchor_candidates:
+                top_anchor = min(anchor_candidates)
+
+        if top_anchor is None:
+            return 0.0
+
+        clamped_top = min(max(float(top_anchor), berth_start), berth_end)
+        offset = clamped_top - berth_start
+        max_offset = max(0.0, berth_span - item_height)
+        if max_offset < 0:
+            max_offset = 0.0
+        if offset > max_offset:
+            offset = max_offset
+        if offset < 0:
+            offset = 0.0
+        return float(offset)
+
+    anchor_candidates: List[float] = []
+    for candidate in (start_meter, end_meter, row.get("f_pos"), row.get("e_pos")):
+        converted = _to_float(candidate)
+        if converted is not None:
+            anchor_candidates.append(converted)
+
+    if not anchor_candidates:
+        return 0.0
+
+    anchor = max(anchor_candidates)
+    offset = BP_BASELINE_M - anchor
+    if offset < 0:
+        offset = 0.0
+    max_offset = max(0.0, BERTH_VERTICAL_SPAN_PX - item_height)
+    if offset > max_offset:
+        offset = max_offset
+    return float(offset)
 
 
 def snap_to_interval(ts: pd.Timestamp, snap_choice: str) -> pd.Timestamp:
@@ -190,7 +340,14 @@ def _build_groups(
     if order:
         normalized_order = _normalize_berth_list(order)
         return [
-            {"id": b, "content": label_map.get(b, b)}
+            {
+                "id": b,
+                "content": label_map.get(b, b),
+                "style": (
+                    f"height: {BERTH_VERTICAL_SPAN_PX}px; "
+                    f"line-height: {BERTH_VERTICAL_SPAN_PX}px;"
+                ),
+            }
             for b in normalized_order
         ]
 
@@ -204,7 +361,17 @@ def _build_groups(
         seen.add(norm)
 
     ordered = sorted(collected, key=_berth_sort_key)
-    return [{"id": b, "content": label_map.get(b, b)} for b in ordered]
+    return [
+        {
+            "id": b,
+            "content": label_map.get(b, b),
+            "style": (
+                f"height: {BERTH_VERTICAL_SPAN_PX}px; "
+                f"line-height: {BERTH_VERTICAL_SPAN_PX}px;"
+            ),
+        }
+        for b in ordered
+    ]
 
 
 CLICK_EVENT_TYPES = {"select", "click", "itemclick", "doubleclick", "contextmenu", "tap"}
@@ -459,26 +626,6 @@ def _render_vessel_modal(
         st.markdown(f"**적하/양하 정보** · 표시 방향: {orientation_label}")
         st.markdown(load_html, unsafe_allow_html=True)
 
-def _compute_height(row: pd.Series) -> float:
-    """선박 LOA 값을 고려해 블록 높이를 가변적으로 계산."""
-
-    DEFAULT_HEIGHT = 48.0
-    MIN_HEIGHT = 28.0
-    MAX_HEIGHT = 96.0
-
-    loa_val = row.get("loa_m")
-    try:
-        loa_float = float(loa_val)
-    except (TypeError, ValueError):
-        loa_float = None
-
-    if loa_float is None or pd.isna(loa_float):
-        return DEFAULT_HEIGHT
-
-    scaled = 28.0 + loa_float * 0.25
-    return max(MIN_HEIGHT, min(MAX_HEIGHT, scaled))
-
-
 def _abbreviate_vessel_label(name: str, max_length: int = 12) -> str:
     """선박명을 카드 내에서 짧게 표현한다."""
 
@@ -615,7 +762,9 @@ def _build_item(row: pd.Series, idx: int, editable: bool, default_orientation: s
     status = str(row.get("status")) if pd.notna(row.get("status")) else "gray"
     color = PALETTE.get(status, PALETTE["gray"])
 
-    height = _compute_height(row)
+    height_px = compute_item_height(row)
+    offset_px = compute_item_offset(row, height_px)
+    item_class = "berth-item bp-aligned"
     style = (
         f"background-color:{color};"
         "border:1px solid rgba(0,0,0,.25);"
@@ -628,7 +777,8 @@ def _build_item(row: pd.Series, idx: int, editable: bool, default_orientation: s
         "align-items:stretch;"
         "justify-content:center;"
         "overflow:hidden;"
-        f"height:{height}px;"
+        f"height:{height_px}px;"
+        f"margin-top:{offset_px}px;"
     )
 
     tooltip_lines = [
@@ -653,6 +803,7 @@ def _build_item(row: pd.Series, idx: int, editable: bool, default_orientation: s
         "end": pd.to_datetime(row["etd"]).isoformat(),
         "editable": editable,
         "style": style,
+        "className": item_class,
         "title": tooltip,
         "orientation": orientation,
         "loadEntries": loads,
@@ -679,7 +830,8 @@ def _make_options(view_start: pd.Timestamp, view_end: pd.Timestamp, editable: bo
         } if editable else False,
         "groupEditable": False,
         "groupHeightMode": "fixed",            # 선석별 행 높이를 고정
-        "groupHeight": 64,                     # 모든 선석을 동일 높이로 표시
+        "groupHeight": BERTH_VERTICAL_SPAN_PX,  # 선석별 높이를 300px로 적용
+        "verticalScroll": True,
         "min": view_start.isoformat(),
         "max": view_end.isoformat(),
         "orientation": {"axis": "top"},        # 상단에 날짜축
