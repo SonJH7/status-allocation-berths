@@ -490,8 +490,8 @@ def ensure_timeline_css() -> None:
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            gap: 4px;
-            padding: 24px 10px 12px 10px;
+            gap: 6px;
+            padding: 28px 12px 14px 12px;
             box-sizing: border-box;
         }}
         .berth-item-card .time-label {{
@@ -518,6 +518,18 @@ def ensure_timeline_css() -> None:
             overflow: hidden;
             text-overflow: ellipsis;
             width: 100%;
+        }}
+        .berth-item-card .quarantine-chip {{
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 4px 12px;
+            border-radius: 999px;
+            background-color: rgba(11, 105, 255, 0.16);
+            color: #0b1a33;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.02em;
         }}
         .berth-item-card .marker-text {{
             font-size: 11px;
@@ -812,13 +824,42 @@ def mark_spacing_warnings(
     return flags
 
 
+def format_meter_position(value: object, prefix: str = "") -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        text = str(value).strip()
+        if not text:
+            return ""
+        return f"{prefix}{text}" if prefix else text
+    if pd.isna(numeric):
+        return ""
+    rounded = int(round(numeric))
+    label = f"{rounded}m"
+    return f"{prefix}{label}" if prefix else label
+
+
 def build_item_html(row: pd.Series) -> Tuple[str, str]:
     vessel = str(row.get("vessel") or "").strip()
     voyage = str(row.get("voyage") or "").strip()
     title = vessel if not voyage else f"{vessel} ({voyage})"
 
-    start_text = format_time_digits(row.get("gantt_start"))
-    end_text = format_time_digits(row.get("etd"))
+    start_text = format_meter_position(row.get("f_pos"), prefix="F")
+    end_text = format_meter_position(row.get("e_pos"), prefix="E")
+
+    if not start_text or not end_text:
+        range_start, range_end = extract_meter_range(row)
+        if not start_text:
+            start_text = format_meter_position(range_start)
+        if not end_text:
+            end_text = format_meter_position(range_end)
+
+    if not start_text:
+        start_text = format_time_digits(row.get("gantt_start"))
+    if not end_text:
+        end_text = format_time_digits(row.get("etd"))
 
     quarantine_text = extract_marker_label(row, QUARANTINE_MARKER_KEYS)
     pilot_text = extract_marker_label(row, PILOT_MARKER_KEYS)
@@ -844,8 +885,8 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
         chip_body = length_text if not bp_text else f"{length_text} · {bp_text}"
         chip_html = f"<div class='length-chip'>{html.escape(chip_body)}</div>"
 
-    marker_top_html = (
-        f"<div class='marker-text top'>{html.escape(quarantine_text)}</div>"
+    quarantine_html = (
+        f"<div class='quarantine-chip'>{html.escape(quarantine_text)}</div>"
         if quarantine_text
         else ""
     )
@@ -871,8 +912,8 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
     <div class='berth-item-card'>
         {start_label_html}
         {end_label_html}
-        {marker_top_html}
         <div class='vessel-name'>{vessel_html}</div>
+        {quarantine_html}
         {marker_bottom_html}
         {chip_html}
     </div>
