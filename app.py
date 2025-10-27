@@ -74,6 +74,19 @@ DEFAULT_COLOR_SEQUENCE = [
     PASTEL_COLORS["pink"],
 ]
 
+REFERENCE_STATUS_COLOR_MAP = {
+    "적하프래닝까지완료": PASTEL_COLORS["pink"],
+    "적하플래닝까지완료": PASTEL_COLORS["pink"],
+    "양하프래닝까지완료": PASTEL_COLORS["cyan"],
+    "양하플래닝까지완료": PASTEL_COLORS["cyan"],
+    "크레인배정완료": PASTEL_COLORS["beige"],
+    "크래인배정완료": PASTEL_COLORS["beige"],
+    "크레인미배정": PASTEL_COLORS["gray"],
+    "크래인미배정": PASTEL_COLORS["gray"],
+}
+
+REFERENCE_COLUMN_CANDIDATES = ("참고", "reference", "remarks", "remark")
+
 AXIS_BACKGROUND_COLOR = "#e5f3ff"
 
 BP_BASELINE_M = 1500.0
@@ -460,7 +473,33 @@ def ensure_timeline_css() -> None:
     st.session_state["_timeline_css_injected"] = True
 
 
+def resolve_reference_status_color(row: pd.Series) -> Optional[str]:
+    for column in REFERENCE_COLUMN_CANDIDATES:
+        if column not in row.index:
+            continue
+        value = row.get(column)
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        normalized = (
+            text.replace(" ", "")
+            .replace("\u3000", "")
+            .replace("\xa0", "")
+            .lower()
+        )
+        for keyword, color in REFERENCE_STATUS_COLOR_MAP.items():
+            if keyword in normalized:
+                return color
+    return None
+
+
 def resolve_background_color(row: pd.Series) -> str:
+    reference_color = resolve_reference_status_color(row)
+    if reference_color:
+        return reference_color
+
     mooring = str(row.get("mooring_type") or "").strip().upper()
     if mooring in MOORING_COLOR_RULE:
         return MOORING_COLOR_RULE[mooring]
@@ -659,7 +698,7 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
     voyage = str(row.get("voyage") or "").strip()
     title = vessel if not voyage else f"{vessel} ({voyage})"
 
-    start_text = format_time_digits(row.get("eta"))
+    start_text = format_time_digits(row.get("gantt_start"))
     end_text = format_time_digits(row.get("etd"))
 
     quarantine_text = extract_marker_label(row, QUARANTINE_MARKER_KEYS)
@@ -712,9 +751,28 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
     tooltip_parts = [
         f"선석: {row.get('berth')}",
         f"선박: {title}",
-        f"ETA: {pd.Timestamp(row.get('eta')).strftime('%Y-%m-%d %H:%M') if pd.notna(row.get('eta')) else ''}",
-        f"ETD: {pd.Timestamp(row.get('etd')).strftime('%Y-%m-%d %H:%M') if pd.notna(row.get('etd')) else ''}",
     ]
+
+    gantt_start = row.get("gantt_start")
+    eta_plan_ts = row.get("eta_plan")
+    eta_actual_ts = row.get("eta")
+    if pd.notna(gantt_start):
+        tooltip_parts.append(
+            f"ETA 계획: {pd.Timestamp(gantt_start).strftime('%Y-%m-%d %H:%M')}"
+        )
+    elif pd.notna(eta_plan_ts):
+        tooltip_parts.append(
+            f"ETA 계획: {pd.Timestamp(eta_plan_ts).strftime('%Y-%m-%d %H:%M')}"
+        )
+    if pd.notna(eta_actual_ts):
+        tooltip_parts.append(
+            f"ETA 실제: {pd.Timestamp(eta_actual_ts).strftime('%Y-%m-%d %H:%M')}"
+        )
+    etd_ts = row.get("etd")
+    if pd.notna(etd_ts):
+        tooltip_parts.append(
+            f"ETD: {pd.Timestamp(etd_ts).strftime('%Y-%m-%d %H:%M')}"
+        )
     if length_text:
         tooltip_parts.append(f"길이: {length_text}")
     if bp_text:
@@ -758,7 +816,7 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
     work = df.copy()
-    for col in ("eta", "etd"):
+    for col in ("eta_plan", "eta", "etd"):
         if col in work.columns:
             work[col] = to_datetime(work[col])
     for col in ("start_meter", "end_meter", "loa_m", "length_m", "f_pos", "e_pos"):
@@ -794,13 +852,20 @@ def render_berth_gantt(
         st.info("표시할 데이터가 없습니다.")
         return prepared, None
 
+    gantt_start = pd.Series(pd.NaT, index=prepared.index, dtype="datetime64[ns]")
+    if "eta_plan" in prepared.columns:
+        gantt_start = gantt_start.combine_first(prepared["eta_plan"])
+    if "eta" in prepared.columns:
+        gantt_start = gantt_start.combine_first(prepared["eta"])
+    prepared["gantt_start"] = gantt_start
+
     base_ts = pd.Timestamp(base_date)
     view_start = base_ts.normalize() - pd.Timedelta(days=1)
     view_end = view_start + pd.Timedelta(days=days) - pd.Timedelta(milliseconds=1)
 
     if "berth" not in prepared.columns:
         st.warning("선석 정보가 없어 간트 차트를 표시할 수 없습니다.")
-        return prepared, None
+        return prepared.drop(columns=["gantt_start"], errors="ignore"), None
 
     prepared["berth"] = prepared["berth"].astype(str)
 
@@ -814,16 +879,16 @@ def render_berth_gantt(
 
     mask = (
         prepared["etd"].notna()
-        & prepared["eta"].notna()
+        & prepared["gantt_start"].notna()
         & (prepared["etd"] >= view_start)
-        & (prepared["etd"] <= view_end)
+        & (prepared["gantt_start"] <= view_end)
         & prepared["berth"].isin(allowed_berths)
     )
     view_df = prepared.loc[mask].copy()
 
     if view_df.empty:
         st.info("선택한 조건에 해당하는 선석 일정이 없습니다.")
-        return prepared, None
+        return prepared.drop(columns=["gantt_start"], errors="ignore"), None
 
     spacing_conflicts = collect_spacing_conflicts(view_df)
     gap_flags = mark_spacing_warnings(view_df, conflicts=spacing_conflicts)
@@ -886,9 +951,9 @@ def render_berth_gantt(
     id_to_index: Dict[str, object] = {}
 
     for idx, row in view_df.iterrows():
-        if pd.isna(row.get("eta")) or pd.isna(row.get("etd")):
+        if pd.isna(row.get("gantt_start")) or pd.isna(row.get("etd")):
             continue
-        start = pd.Timestamp(row["eta"]).isoformat()
+        start = pd.Timestamp(row["gantt_start"]).isoformat()
         end = pd.Timestamp(row["etd"]).isoformat()
         content_html, tooltip = build_item_html(row)
         item_id = str(idx)
@@ -1034,15 +1099,23 @@ def render_berth_gantt(
 
         if target_index is not None and has_edit:
             if "start" in event_payload:
-                updated.loc[target_index, "eta"] = snap_to_interval(
+                snapped_start = snap_to_interval(
                     pd.to_datetime(event_payload["start"]), snap_choice
                 )
+                updated.loc[target_index, "gantt_start"] = snapped_start
+                if "eta_plan" in updated.columns:
+                    updated.loc[target_index, "eta_plan"] = snapped_start
+                if "eta" in updated.columns:
+                    updated.loc[target_index, "eta"] = snapped_start
             if "end" in event_payload:
                 updated.loc[target_index, "etd"] = snap_to_interval(
                     pd.to_datetime(event_payload["end"]), snap_choice
                 )
             if "group" in event_payload and event_payload["group"] is not None:
                 updated.loc[target_index, "berth"] = str(event_payload["group"])
+
+    if "gantt_start" in updated.columns:
+        updated = updated.drop(columns=["gantt_start"], errors="ignore")
 
     return updated, event_payload
 
@@ -1061,9 +1134,15 @@ def apply_filters(
     if date_start is not None and "etd" in work.columns:
         start_ts = pd.Timestamp(date_start)
         work = work[(work["etd"].isna()) | (work["etd"] >= start_ts)]
-    if date_end is not None and "eta" in work.columns:
-        end_ts = pd.Timestamp(date_end)
-        work = work[(work["eta"].isna()) | (work["eta"] <= end_ts + pd.Timedelta(days=1))]
+    if date_end is not None:
+        end_ts = pd.Timestamp(date_end) + pd.Timedelta(days=1)
+        start_series = pd.Series(pd.NaT, index=work.index, dtype="datetime64[ns]")
+        if "eta_plan" in work.columns:
+            start_series = start_series.combine_first(work["eta_plan"])
+        if "eta" in work.columns:
+            start_series = start_series.combine_first(work["eta"])
+        if not start_series.empty:
+            work = work[(start_series.isna()) | (start_series <= end_ts)]
 
     if operator_filter:
         keyword = operator_filter.strip().upper()
