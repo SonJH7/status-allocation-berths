@@ -78,7 +78,6 @@ AXIS_BACKGROUND_COLOR = "#e5f3ff"
 
 BP_BASELINE_M = 1500.0
 BERTH_VERTICAL_SPAN_PX = 300.0
-
 QUARANTINE_MARKER_KEYS = ("quarantine_flag", "quarantine", "검역")
 PILOT_MARKER_KEYS = ("pilot_flag", "pilotage_flag", "pilotage", "pilot", "pilot_text", "도선")
 
@@ -340,6 +339,29 @@ def ensure_timeline_css() -> None:
         .vis-labelset .vis-label {{
             padding-left: 68px;
         }}
+        .berth-label {{
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            align-items: flex-start;
+        }}
+        .berth-label .berth-name {{
+            font-weight: 700;
+            font-size: 15px;
+            color: #0f2d4c;
+        }}
+        .berth-label .bp-axis {{
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            font-size: 11px;
+            color: #4b5563;
+            line-height: 1.1;
+        }}
+        .berth-label .bp-axis span:first-child {{
+            color: #1f2937;
+            font-weight: 700;
+        }}
         .berth-label {
             display: flex;
             flex-direction: column;
@@ -478,6 +500,26 @@ def extract_marker_label(row: pd.Series, keys: Iterable[str]) -> str:
         if text and text.lower() != "nan":
             return text
     return ""
+
+
+def extract_meter_range(row: pd.Series) -> Tuple[Optional[float], Optional[float]]:
+    start = row.get("start_meter")
+    end = row.get("end_meter")
+
+    if start is None or pd.isna(start):
+        start = row.get("f_pos")
+    if end is None or pd.isna(end):
+        end = row.get("e_pos")
+
+    def _to_float(value) -> Optional[float]:
+        if value is None or pd.isna(value):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    return _to_float(start), _to_float(end)
 
 
 def extract_meter_range(row: pd.Series) -> Tuple[Optional[float], Optional[float]]:
