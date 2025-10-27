@@ -1148,18 +1148,37 @@ def apply_filters(
         return pd.DataFrame()
     work = df.copy()
 
-    if date_start is not None and "etd" in work.columns:
+    start_series = pd.Series(pd.NaT, index=work.index, dtype="datetime64[ns]")
+    if "eta_plan" in work.columns:
+        start_series = start_series.combine_first(work["eta_plan"])
+    if "eta" in work.columns:
+        start_series = start_series.combine_first(work["eta"])
+    if "work_complete" in work.columns:
+        start_series = start_series.combine_first(work["work_complete"])
+    if "etd" in work.columns:
+        start_series = start_series.combine_first(work["etd"])
+
+    end_series = pd.Series(pd.NaT, index=work.index, dtype="datetime64[ns]")
+    if "etd" in work.columns:
+        end_series = end_series.combine_first(work["etd"])
+    if "work_complete" in work.columns:
+        end_series = end_series.combine_first(work["work_complete"])
+    if "eta" in work.columns:
+        end_series = end_series.combine_first(work["eta"])
+    if "eta_plan" in work.columns:
+        end_series = end_series.combine_first(work["eta_plan"])
+
+    if date_start is not None:
         start_ts = pd.Timestamp(date_start)
-        work = work[(work["etd"].isna()) | (work["etd"] >= start_ts)]
+        work = work[
+            (start_series.isna())
+            | (start_series >= start_ts)
+            | ((end_series.notna()) & (end_series >= start_ts))
+        ]
+
     if date_end is not None:
         end_ts = pd.Timestamp(date_end) + pd.Timedelta(days=1)
-        start_series = pd.Series(pd.NaT, index=work.index, dtype="datetime64[ns]")
-        if "eta_plan" in work.columns:
-            start_series = start_series.combine_first(work["eta_plan"])
-        if "eta" in work.columns:
-            start_series = start_series.combine_first(work["eta"])
-        if not start_series.empty:
-            work = work[(start_series.isna()) | (start_series <= end_ts)]
+        work = work[(start_series.isna()) | (start_series <= end_ts)]
 
     if operator_filter:
         keyword = operator_filter.strip().upper()
