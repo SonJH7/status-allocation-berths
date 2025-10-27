@@ -1,10 +1,13 @@
 # crawler.py
 from __future__ import annotations
 
+from dataclasses import dataclass
 from io import StringIO
 import os
 from http import cookiejar
 from pathlib import Path
+import ast
+import re
 from typing import Mapping
 
 import pandas as pd
@@ -15,6 +18,7 @@ FRAME_URL = (
     "https://info.bptc.co.kr/content/sw/frame/berth_status_text_frame_sw_kr.jsp"
     "?p_id=BETX_SH_KR&snb_num=2&snb_div=service"
 )
+G_PAGE_URL = "https://info.bptc.co.kr/content/sw/jsp/berth_g_sw_kr.jsp"
 
 SECURITY_WALL_MARKERS = tuple(
     marker.lower()
@@ -337,4 +341,226 @@ def fetch_bptc_t(
     print(f"✅ 크롤링 성공: {len(df)}건, 컬럼: {df.columns.tolist()}")
     return df
 
-__all__ = ["fetch_bptc_t"]
+def _to_float(value: str | float | int | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_css_numeric(style: str) -> dict[str, float | str | None]:
+    out: dict[str, float | str | None] = {}
+    if not style:
+        return out
+
+    for key in ("left", "top", "width", "height"):
+        match = re.search(rf"{key}\s*:\s*([-0-9.]+)px", style, flags=re.IGNORECASE)
+        if match:
+            out[f"{key}_px"] = _to_float(match.group(1))
+
+    color_match = re.search(r"background-color\s*:\s*([^;]+)", style, flags=re.IGNORECASE)
+    if color_match:
+        out["background_color"] = color_match.group(1).strip()
+
+    return out
+
+
+def _parse_vslmsg_args(href: str | None) -> tuple[str, ...] | None:
+    if not href:
+        return None
+    href = href.strip()
+    prefix = "javascript:VslMsg("
+    if not href.startswith(prefix) or not href.endswith(")"):
+        return None
+    body = href[len(prefix):-1]
+    try:
+        return ast.literal_eval("(" + body + ")")
+    except (ValueError, SyntaxError):
+        return None
+
+
+def _extract_time_cells(section: BeautifulSoup | None) -> dict[str, str | None]:
+    info: dict[str, str | None] = {"eta_display": None, "etd_display": None, "mid_display": None}
+    if section is None:
+        return info
+
+    table = section.find("table")
+    if table:
+        cells = table.find_all("td")
+        if cells:
+            info["eta_display"] = cells[0].get_text(strip=True) or None
+        if len(cells) >= 3:
+            info["etd_display"] = cells[2].get_text(strip=True) or None
+        if len(cells) >= 2:
+            info["mid_display"] = cells[1].get_text(strip=True) or None
+
+    return info
+
+
+def _collect_info_lines(section: BeautifulSoup | None) -> tuple[str | None, list[str]]:
+    if section is None:
+        return None, []
+    lines = [" ".join(chunk.split()) for chunk in section.stripped_strings]
+    lines = [line for line in lines if line]
+    if not lines:
+        return None, []
+    return lines[0], lines[1:]
+
+
+@dataclass
+class BerthGData:
+    """선석배정(G) 페이지의 블록/캘린더 정보."""
+
+    blocks: pd.DataFrame
+    calendar: pd.DataFrame
+
+
+def parse_berth_g_html(html: str) -> BerthGData:
+    """`berth_g_sw_kr.jsp` HTML에서 블록/캘린더 정보를 추출한다."""
+
+    soup = BeautifulSoup(html, "lxml")
+    anchors = soup.select("section#layer1 > a[href^='javascript:VslMsg']")
+
+    block_rows: list[dict] = []
+    for idx, anchor in enumerate(anchors):
+        msg_args = _parse_vslmsg_args(anchor.get("href"))
+        block_section = anchor.find("section", id=re.compile(r"^vsl", re.IGNORECASE))
+        info_section = anchor.find("section", id=re.compile(r"^vinf", re.IGNORECASE))
+
+        row: dict[str, object] = {
+            "index": idx,
+            "block_id": block_section.get("id") if block_section else None,
+            "info_id": info_section.get("id") if info_section else None,
+            "href": anchor.get("href"),
+        }
+        row.update(_parse_css_numeric(block_section.get("style", "")) if block_section else {})
+        row.update(_extract_time_cells(block_section))
+
+        info_label, extra_lines = _collect_info_lines(info_section)
+        row["info_label"] = info_label
+        row["info_lines"] = extra_lines
+
+        if msg_args:
+            names = [
+                "mode",
+                "service_code",
+                "voyage_year",
+                "berth_code",
+                "start_hint",
+                "end_hint",
+                "draft_hint",
+                "alignment",
+                "operator",
+                "vessel_name",
+                "remark",
+                "memo",
+            ]
+            for name, value in zip(names, msg_args):
+                row[name] = value
+            row["voyage_year"] = _to_int(row.get("voyage_year"))
+            row["berth_code"] = row.get("berth_code")
+            row["start_hint"] = _to_int(row.get("start_hint"))
+            row["end_hint"] = _to_int(row.get("end_hint"))
+            row["draft_hint"] = _to_int(row.get("draft_hint"))
+
+        block_rows.append(row)
+
+    blocks_df = pd.DataFrame(block_rows)
+
+    calendar_rows: list[dict[str, object]] = []
+    calendar_table = soup.select_one("table.Calendar")
+    if calendar_table:
+        headers = [th.get_text(strip=True) for th in calendar_table.select("thead th")]
+        date_headers = headers[1:]
+        for tr in calendar_table.select("tbody tr"):
+            cells = tr.find_all("td")
+            if not cells:
+                continue
+            berth_label = cells[0].get_text(" ", strip=True)
+            for idx_cell, cell in enumerate(cells[1:]):
+                calendar_rows.append(
+                    {
+                        "berth_label": berth_label,
+                        "date_label": date_headers[idx_cell] if idx_cell < len(date_headers) else None,
+                        "cell_text": cell.get_text(strip=True) or None,
+                        "cell_class": " ".join(cell.get("class", [])),
+                    }
+                )
+
+    calendar_df = pd.DataFrame(calendar_rows)
+
+    return BerthGData(blocks=blocks_df, calendar=calendar_df)
+
+
+def fetch_bptc_g(
+    *,
+    params: Mapping[str, str] | None = None,
+    timeout: float = 30.0,
+    trust_env: bool | None = None,
+    cookies: cookiejar.CookieJar | Mapping[str, str] | str | None = None,
+    proxies: Mapping[str, str] | None = None,
+    extra_headers: Mapping[str, str] | None = None,
+) -> BerthGData:
+    """선석배정 현황(G) 페이지 전체 HTML을 크롤링해 파싱한다."""
+
+    default_params = {
+        "p_id": "BEGR_SH_KR",
+        "snb_num": "2",
+        "snb_div": "service",
+        "pop_ok": "Y",
+    }
+    if params:
+        default_params.update(params)
+
+    env_cookie = os.getenv("BPTC_COOKIE")
+    if cookies is None and env_cookie:
+        cookies = env_cookie
+
+    if proxies is None:
+        proxies = _load_env_proxies()
+
+    sess = _init_session(
+        timeout=timeout,
+        trust_env=trust_env,
+        cookies=cookies,
+        proxies=proxies,
+        extra_headers=extra_headers,
+    )
+
+    headers = {
+        **BASE_HEADERS,
+        "Referer": FRAME_URL,
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+        "sec-ch-ua": '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+    }
+
+    try:
+        resp = sess.get(G_PAGE_URL, params=default_params, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        resp.encoding = resp.apparent_encoding or "euc-kr"
+        _ensure_not_security_wall(resp, dump_prefix="g_page")
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"BPTC G 페이지 요청 실패: {exc}") from exc
+
+    return parse_berth_g_html(resp.text)
+
+
+__all__ = ["fetch_bptc_t", "fetch_bptc_g", "parse_berth_g_html", "BerthGData"]
