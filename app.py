@@ -488,26 +488,35 @@ def ensure_timeline_css() -> None:
             height: 100%;
             display: flex;
             flex-direction: column;
-            align-items: center;
             justify-content: center;
-            gap: 6px;
-            padding: 28px 12px 14px 12px;
+            align-items: center;
+            padding: 18px 12px 14px 12px;
             box-sizing: border-box;
+            gap: 6px;
         }}
-        .berth-item-card .time-label {{
+        .berth-item-card .time-row {{
             position: absolute;
             top: 6px;
+            left: 0;
+            right: 0;
+            display: flex;
+            justify-content: space-between;
+            padding: 0 10px;
             font-size: 12px;
             font-weight: 700;
             color: #0f2d4c;
         }}
-        .berth-item-card .time-label.start {{
-            left: 10px;
-            text-align: left;
+        .berth-item-card .time-row .time {{
+            min-width: 20px;
+            text-align: center;
         }}
-        .berth-item-card .time-label.end {{
-            right: 10px;
-            text-align: right;
+        .berth-item-card .center-stack {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+            width: 100%;
         }}
         .berth-item-card .vessel-name {{
             text-align: center;
@@ -519,23 +528,14 @@ def ensure_timeline_css() -> None:
             text-overflow: ellipsis;
             width: 100%;
         }}
-        .berth-item-card .quarantine-chip {{
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            padding: 4px 12px;
-            border-radius: 999px;
-            background-color: rgba(11, 105, 255, 0.16);
-            color: #0b1a33;
-            font-size: 12px;
-            font-weight: 700;
-            letter-spacing: 0.02em;
-        }}
         .berth-item-card .marker-text {{
             font-size: 11px;
-            font-weight: 600;
-            color: #1f3b73;
-            line-height: 1;
+            font-weight: 700;
+            color: #0f2d4c;
+            line-height: 1.1;
+        }}
+        .berth-item-card .marker-text.top {{
+            font-size: 12px;
         }}
         .berth-item-card .marker-text.bottom {{
             margin-top: 2px;
@@ -678,8 +678,12 @@ def compute_item_height(row: pd.Series) -> float:
     max_height = berth_span if berth_span is not None else BERTH_VERTICAL_SPAN_PX
     start_meter, end_meter = extract_meter_range(row)
     if start_meter is not None and end_meter is not None:
-        span = abs(end_meter - start_meter)
+        lower = float(min(start_meter, end_meter))
+        upper = float(max(start_meter, end_meter))
+        span = upper - lower
         if span > 0:
+            if berth_span is not None:
+                span = min(span, berth_span)
             return float(max(24.0, min(max_height, span)))
 
     length_val = row.get("loa_m")
@@ -705,45 +709,61 @@ def compute_item_offset(row: pd.Series, item_height: float) -> float:
         except (TypeError, ValueError):
             return None
 
-    anchor_candidates: List[float] = []
+    start_meter, end_meter = extract_meter_range(row)
+    berth_range = get_berth_meter_range(row.get("berth"))
 
-    for key in ("f_pos", "e_pos"):
-        converted = _to_float(row.get(key))
+    if (
+        berth_range is not None
+        and berth_range[0] is not None
+        and berth_range[1] is not None
+        and berth_range[1] > berth_range[0]
+    ):
+        berth_start = float(berth_range[0])
+        berth_end = float(berth_range[1])
+        berth_span = berth_end - berth_start
+
+        top_anchor = _to_float(start_meter)
+        bottom_anchor = _to_float(end_meter)
+        if top_anchor is None and bottom_anchor is not None:
+            top_anchor = bottom_anchor
+        if top_anchor is None:
+            anchor_candidates: List[float] = []
+            for key in ("f_pos", "e_pos"):
+                converted = _to_float(row.get(key))
+                if converted is not None:
+                    anchor_candidates.append(converted)
+            if anchor_candidates:
+                top_anchor = min(anchor_candidates)
+
+        if top_anchor is None:
+            return 0.0
+
+        clamped_top = min(max(float(top_anchor), berth_start), berth_end)
+        offset = clamped_top - berth_start
+        max_offset = max(0.0, berth_span - item_height)
+        if max_offset < 0:
+            max_offset = 0.0
+        if offset > max_offset:
+            offset = max_offset
+        if offset < 0:
+            offset = 0.0
+        return float(offset)
+
+    # Fallback: use original baseline-based logic when 선석 범위를 알 수 없는 경우
+    anchor_candidates: List[float] = []
+    for candidate in (start_meter, end_meter, row.get("f_pos"), row.get("e_pos")):
+        converted = _to_float(candidate)
         if converted is not None:
             anchor_candidates.append(converted)
-
-    if not anchor_candidates:
-        start_meter, end_meter = extract_meter_range(row)
-        for candidate in (start_meter, end_meter):
-            if candidate is not None:
-                anchor_candidates.append(candidate)
 
     if not anchor_candidates:
         return 0.0
 
     anchor = max(anchor_candidates)
-
-    berth_range = get_berth_meter_range(row.get("berth"))
-    if berth_range is not None:
-        start, end = berth_range
-        range_span = None
-        if start is not None and end is not None:
-            anchor = min(max(anchor, float(start)), float(end))
-            range_span = float(end - start) if end > start else None
-            baseline = float(end)
-        else:
-            baseline = BP_BASELINE_M
-        offset = baseline - anchor
-        if offset < 0:
-            offset = 0.0
-        max_span = range_span if range_span is not None and range_span > 0 else BERTH_VERTICAL_SPAN_PX
-        max_offset = max(0.0, max_span - item_height)
-    else:
-        offset = BP_BASELINE_M - anchor
-        if offset < 0:
-            offset = 0.0
-        max_offset = max(0.0, BERTH_VERTICAL_SPAN_PX - item_height)
-
+    offset = BP_BASELINE_M - anchor
+    if offset < 0:
+        offset = 0.0
+    max_offset = max(0.0, BERTH_VERTICAL_SPAN_PX - item_height)
     if offset > max_offset:
         offset = max_offset
     return float(offset)
@@ -846,20 +866,14 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
     voyage = str(row.get("voyage") or "").strip()
     title = vessel if not voyage else f"{vessel} ({voyage})"
 
-    start_text = format_meter_position(row.get("f_pos"), prefix="F")
-    end_text = format_meter_position(row.get("e_pos"), prefix="E")
+    range_start, range_end = extract_meter_range(row)
 
-    if not start_text or not end_text:
-        range_start, range_end = extract_meter_range(row)
-        if not start_text:
-            start_text = format_meter_position(range_start)
-        if not end_text:
-            end_text = format_meter_position(range_end)
-
-    if not start_text:
-        start_text = format_time_digits(row.get("gantt_start"))
-    if not end_text:
-        end_text = format_time_digits(row.get("etd"))
+    start_hour = (
+        format_time_digits(row.get("gantt_start"))
+        or format_time_digits(row.get("eta"))
+        or format_time_digits(row.get("eta_plan"))
+    )
+    end_hour = format_time_digits(row.get("etd"))
 
     quarantine_text = extract_marker_label(row, QUARANTINE_MARKER_KEYS)
     pilot_text = extract_marker_label(row, PILOT_MARKER_KEYS)
@@ -886,36 +900,42 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
         chip_html = f"<div class='length-chip'>{html.escape(chip_body)}</div>"
 
     quarantine_html = (
-        f"<div class='quarantine-chip'>{html.escape(quarantine_text)}</div>"
-        if quarantine_text
-        else ""
+        "<div class='marker-text top'>검역</div>" if quarantine_text else ""
     )
+
+    display_pilot = ""
+    if pilot_text:
+        display_pilot = pilot_text if "도선" in pilot_text else "도선"
+
     marker_bottom_html = (
-        f"<div class='marker-text bottom'>{html.escape(pilot_text)}</div>"
-        if pilot_text
+        f"<div class='marker-text bottom'>{html.escape(display_pilot)}</div>"
+        if display_pilot
         else ""
     )
 
     vessel_html = html.escape(vessel)
-    start_label_html = (
-        f"<div class='time-label start'>{html.escape(start_text)}</div>"
-        if start_text
-        else ""
-    )
-    end_label_html = (
-        f"<div class='time-label end'>{html.escape(end_text)}</div>"
-        if end_text
-        else ""
-    )
+
+    time_row_html = ""
+    if start_hour or end_hour:
+        time_row_html = (
+            "<div class='time-row'>"
+            f"<span class='time start'>{html.escape(start_hour)}</span>"
+            f"<span class='time end'>{html.escape(end_hour)}</span>"
+            "</div>"
+        )
+
+    center_stack_parts = [part for part in (quarantine_html, f"<div class='vessel-name'>{vessel_html}</div>") if part]
+    if marker_bottom_html:
+        center_stack_parts.append(marker_bottom_html)
+    if chip_html:
+        center_stack_parts.append(chip_html)
+
+    center_stack_html = "<div class='center-stack'>" + "".join(center_stack_parts) + "</div>"
 
     html_t = f"""
     <div class='berth-item-card'>
-        {start_label_html}
-        {end_label_html}
-        <div class='vessel-name'>{vessel_html}</div>
-        {quarantine_html}
-        {marker_bottom_html}
-        {chip_html}
+        {time_row_html}
+        {center_stack_html}
     </div>
     """
 
