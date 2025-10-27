@@ -120,7 +120,9 @@ def fetch_bptc_g_vslmsg(timeout: float = 30.0) -> pd.DataFrame:
         + "-"
         + df["call_no"].astype(str).str.strip()
     )
-    df["bp_raw"] = df["bitt"].astype(str).str.replace(" ", "")
+    df["bitt"] = df["bitt"].astype(str).str.strip()
+    df["bp_text"] = df["bitt"]
+    df["bp_raw"] = df["bp_text"].str.replace(" ", "")
 
     numeric_cols = ["loc_cnt", "dis_cnt", "sft_cnt", "f_pos", "e_pos", "length_m"]
     for col in numeric_cols:
@@ -135,12 +137,13 @@ def fetch_bptc_g_vslmsg(timeout: float = 30.0) -> pd.DataFrame:
             "dis_cnt",
             "sft_cnt",
             "plan_cd",
+            "bp_text",
             "bp_raw",
             "f_pos",
             "e_pos",
             "length_m",
         ]
-    ].rename(columns={"oper_cd": "operator"})
+    ].rename(columns={"oper_cd": "operator", "bp_text": "bitt"})
 
 
 __all__ = ["fetch_bptc_g_vslmsg"]
