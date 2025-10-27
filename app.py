@@ -12,6 +12,8 @@ import streamlit as st
 from bs4 import BeautifulSoup
 from streamlit_timeline import st_timeline
 
+from bptc_vslmsg import fetch_bptc_g_vslmsg
+
 import numpy as np
 
 # ------------------------------------------------------------
@@ -177,7 +179,50 @@ def fetch_bptc_dataframe() -> pd.DataFrame:
     if "berth" in df.columns:
         df["berth"] = df["berth"].astype(str)
 
+    try:
+        vslmsg_df = fetch_vslmsg_dataframe()
+    except Exception as exc:
+        print(f"⚠️ VslMsg 데이터 병합 실패: {exc}")
+        vslmsg_df = pd.DataFrame()
+
+    if not vslmsg_df.empty:
+        vslmsg_df = vslmsg_df.copy()
+        vslmsg_df["start_meter"] = vslmsg_df[["f_pos", "e_pos"]].min(axis=1)
+        vslmsg_df["end_meter"] = vslmsg_df[["f_pos", "e_pos"]].max(axis=1)
+        merge_keys = [key for key in ("voyage", "vessel") if key in df.columns and key in vslmsg_df.columns]
+        if not merge_keys:
+            merge_keys = ["vessel"]
+        vslmsg_compact = vslmsg_df.drop_duplicates(subset=merge_keys)
+        extra_cols = [col for col in ["bp_raw", "f_pos", "e_pos", "length_m", "start_meter", "end_meter"] if col in vslmsg_compact.columns]
+        df = df.merge(vslmsg_compact[merge_keys + extra_cols], on=merge_keys, how="left")
+
+        missing_mask = df.get("length_m").isna() if "length_m" in df.columns else pd.Series(False, index=df.index)
+        if missing_mask.any():
+            fallback = vslmsg_df.dropna(subset=["length_m"]).drop_duplicates(subset=["vessel"])
+            fallback = fallback.set_index("vessel")
+            for col in ["bp_raw", "f_pos", "e_pos", "length_m", "start_meter", "end_meter"]:
+                if col not in df.columns:
+                    df[col] = None
+                if col in fallback.columns:
+                    df.loc[missing_mask, col] = df.loc[missing_mask, "vessel"].map(fallback[col])
+
+    if "start_meter" not in df.columns and {"f_pos", "e_pos"}.issubset(df.columns):
+        df["start_meter"] = df[["f_pos", "e_pos"]].min(axis=1)
+        df["end_meter"] = df[["f_pos", "e_pos"]].max(axis=1)
+
+    if "length_m" in df.columns and "loa_m" not in df.columns:
+        df["loa_m"] = df["length_m"]
+
     return df
+
+
+@st.cache_data(show_spinner=False)
+def fetch_vslmsg_dataframe() -> pd.DataFrame:
+    try:
+        return fetch_bptc_g_vslmsg()
+    except Exception as exc:
+        print(f"⚠️ VslMsg 크롤링 실패: {exc}")
+        return pd.DataFrame()
 
 
 def get_demo_df(base_date: Optional[pd.Timestamp] = None) -> pd.DataFrame:
@@ -283,81 +328,64 @@ def ensure_timeline_css() -> None:
         }}
         .vis-timeline .vis-item.berth-item {{
             border-radius: 12px;
-            border: 1px solid rgba(0,0,0,0.25);
-            font-size: 12px;
-            color: #1e1e1e;
-            height: 46px;
+            border: 2px solid rgba(15, 45, 76, 0.2);
+            overflow: visible;
         }}
-        .berth-item-content {{
+        .vis-timeline .vis-item.berth-item .vis-item-content {{
+            padding: 0 !important;
+            height: 100%;
+        }}
+        .vis-timeline .vis-item.berth-item.gap-warning {{
+            border-color: #d97706;
+            box-shadow: 0 0 0 2px rgba(217, 119, 6, 0.3);
+        }}
+        .berth-item-card {{
             position: relative;
             width: 100%;
             height: 100%;
             display: flex;
             flex-direction: column;
+            align-items: center;
             justify-content: center;
-            padding: 4px 8px 6px 8px;
+            gap: 2px;
+            padding: 6px 8px 8px 8px;
             box-sizing: border-box;
-            overflow: hidden;
         }}
-        .berth-item-content .corner-tag {{
-            position: absolute;
-            top: 2px;
-            font-size: 10px;
-            font-weight: 600;
-            color: #224163;
-            background-color: rgba(255,255,255,0.75);
-            border-radius: 6px;
-            padding: 1px 4px;
+        .berth-item-card .time-row {{
+            display: flex;
+            width: 100%;
+            justify-content: space-between;
+            font-size: 12px;
+            font-weight: 700;
+            color: #0f2d4c;
         }}
-        .berth-item-content .corner-tag.right {{
-            right: 4px;
-        }}
-        .berth-item-content .corner-tag.left {{
-            left: 4px;
-        }}
-        .berth-item-content .title {{
+        .berth-item-card .vessel-name {{
             text-align: center;
             font-weight: 700;
-            font-size: 13px;
-            color: #14233c;
-            margin-bottom: 2px;
+            font-size: 14px;
+            color: #0b1a33;
+            white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
-            white-space: nowrap;
+            width: 100%;
         }}
-        .berth-item-content .ld-wrapper {{
-            display: flex;
-            gap: 6px;
-            justify-content: center;
-            align-items: center;
-            flex-wrap: wrap;
+        .berth-item-card .marker-text {{
             font-size: 11px;
-            line-height: 1.1;
-        }}
-        .berth-item-content .ld-wrapper .ld-block {{
-            display: flex;
-            gap: 3px;
-            align-items: baseline;
-            background-color: rgba(255,255,255,0.6);
-            border-radius: 6px;
-            padding: 1px 5px;
-        }}
-        .berth-item-content .ld-wrapper .label {{
             font-weight: 600;
-            color: #0f2d4c;
+            color: #1f3b73;
+            line-height: 1;
         }}
-        .berth-item-content .ld-wrapper .value {{
-            color: #0f2d4c;
+        .berth-item-card .marker-text.bottom {{
+            margin-top: 2px;
         }}
-        .berth-item-content .badge {{
-            position: absolute;
-            bottom: 2px;
-            left: 0;
-            right: 0;
-            text-align: center;
+        .berth-item-card .length-chip {{
             font-size: 11px;
-            font-weight: 700;
-            color: #0c4fb8;
+            font-weight: 600;
+            color: #0b1a33;
+            background-color: rgba(255, 255, 255, 0.75);
+            border-radius: 999px;
+            padding: 2px 8px;
+            margin-top: 2px;
         }}
         .vis-time-axis .vis-grid.vis-major {{
             border-width: 2px 0 0 0;
@@ -388,72 +416,132 @@ def resolve_background_color(row: pd.Series) -> str:
     return DEFAULT_COLOR_SEQUENCE[0]
 
 
-def format_small_value(value: object) -> str:
+def format_time_digits(value: object) -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return ""
-    if isinstance(value, (int, float)):
-        return f"{int(value):02d}"
-    text = str(value).strip()
-    return text
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.isna(ts):
+        return ""
+    return f"{ts.strftime('%m%d')} {ts.strftime('%H%M')}"
 
 
-def format_qty_value(value: object) -> str:
-    if value is None or pd.isna(value):
-        return "0"
-    if isinstance(value, (int, float)):
-        return str(int(float(value)))
-    text = str(value).strip()
-    return text if text else "0"
+def compute_item_height(row: pd.Series) -> float:
+    length_val = row.get("loa_m")
+    if length_val is None or pd.isna(length_val):
+        length_val = row.get("length_m")
+    try:
+        numeric = float(length_val)
+    except (TypeError, ValueError):
+        numeric = None
+
+    if numeric is None or pd.isna(numeric):
+        return 86.0
+    return max(72.0, min(180.0, 44.0 + numeric * 0.35))
+
+
+def collect_spacing_conflicts(
+    df: pd.DataFrame, min_gap_m: float = 30.0
+) -> List[Dict[str, object]]:
+    conflicts: List[Dict[str, object]] = []
+    if df is None or df.empty or "berth" not in df.columns:
+        return conflicts
+
+    working = df.copy()
+    for col in ("start_meter", "end_meter"):
+        if col in working.columns:
+            working[col] = pd.to_numeric(working[col], errors="coerce")
+
+    if "start_meter" not in working.columns or "end_meter" not in working.columns:
+        return conflicts
+
+    for berth, group in working.groupby("berth"):
+        valid = group.dropna(subset=["start_meter", "end_meter"])  # type: ignore[arg-type]
+        if valid.empty:
+            continue
+        ordered = valid.sort_values("start_meter")
+        prev_row = None
+        for idx, row in ordered.iterrows():
+            start = float(row["start_meter"])
+            end = float(row["end_meter"])
+            if start > end:
+                start, end = end, start
+            if prev_row is not None:
+                prev_end = float(prev_row["end_meter"])
+                prev_start = float(prev_row["start_meter"])
+                if prev_start > prev_end:
+                    prev_start, prev_end = prev_end, prev_start
+                gap = start - prev_end
+                if gap < min_gap_m:
+                    conflicts.append(
+                        {
+                            "berth": berth,
+                            "gap": gap,
+                            "previous_index": prev_row.name,
+                            "current_index": idx,
+                            "previous_vessel": prev_row.get("vessel"),
+                            "current_vessel": row.get("vessel"),
+                            "previous_range": (prev_start, prev_end),
+                            "current_range": (start, end),
+                        }
+                    )
+            prev_row = row
+
+    return conflicts
+
+
+def mark_spacing_warnings(
+    df: pd.DataFrame,
+    min_gap_m: float = 30.0,
+    *,
+    conflicts: Optional[List[Dict[str, object]]] = None,
+) -> pd.Series:
+    if conflicts is None:
+        conflicts = collect_spacing_conflicts(df, min_gap_m=min_gap_m)
+    flags = pd.Series(False, index=df.index)
+    for conflict in conflicts:
+        for key in ("previous_index", "current_index"):
+            idx = conflict.get(key)
+            if idx in flags.index:
+                flags.at[idx] = True
+    return flags
 
 
 def build_item_html(row: pd.Series) -> Tuple[str, str]:
-    start_tag = row.get("start_tag")
-    end_tag = row.get("end_tag")
-
-    if not start_tag:
-        start_tag = row.get("eta_plan")
-    if isinstance(start_tag, (datetime, pd.Timestamp)):
-        start_tag = pd.Timestamp(start_tag).strftime("%d%H")
-    if not start_tag:
-        start_tag = row.get("load_qty")
-    start_tag_text = format_small_value(start_tag)
-
-    if not end_tag:
-        end_tag = row.get("discharge_qty")
-    if isinstance(end_tag, (datetime, pd.Timestamp)):
-        end_tag = pd.Timestamp(end_tag).strftime("%d%H")
-    end_tag_text = format_small_value(end_tag)
-
-    voyage = str(row.get("voyage") or "").strip()
     vessel = str(row.get("vessel") or "").strip()
-    title = f"{vessel}({voyage})" if voyage else vessel
+    voyage = str(row.get("voyage") or "").strip()
+    title = vessel if not voyage else f"{vessel} ({voyage})"
 
-    def fmt_qty(name: str, value: object) -> str:
-        if value is None or (isinstance(value, float) and pd.isna(value)):
-            return f"{name} 0"
-        if isinstance(value, float):
-            value = int(value)
-        return f"{name} {value}"
+    start_text = format_time_digits(row.get("eta"))
+    end_text = format_time_digits(row.get("etd"))
 
-    load_block = fmt_qty("적하", row.get("load_qty"))
-    discharge_block = fmt_qty("양하", row.get("discharge_qty"))
-    sh_block = fmt_qty("S/H", row.get("sh_qty"))
-    transfer_block = fmt_qty("전배", row.get("transfer_qty"))
+    length_val = row.get("loa_m") if not pd.isna(row.get("loa_m")) else row.get("length_m")
+    length_text = ""
+    if length_val is not None and not pd.isna(length_val):
+        try:
+            length_num = float(length_val)
+            length_text = f"{int(round(length_num))} m"
+        except (TypeError, ValueError):
+            length_text = str(length_val)
 
-    badge_text = "검역" if str(row.get("quarantine_flag") or "").strip() else "도선"
+    bp_text = str(row.get("bp_raw") or "").strip()
+    if not bp_text:
+        f_pos = row.get("f_pos")
+        e_pos = row.get("e_pos")
+        if f_pos is not None and e_pos is not None and not pd.isna(f_pos) and not pd.isna(e_pos):
+            bp_text = f"F:{int(f_pos)} / E:{int(e_pos)}"
+
+    chip_html = ""
+    if length_text:
+        chip_body = length_text if not bp_text else f"{length_text} · {bp_text}"
+        chip_html = f"<div class='length-chip'>{chip_body}</div>"
 
     html = f"""
-    <div class='berth-item-content'>
-        <div class='corner-tag left'>{start_tag_text}</div>
-        <div class='corner-tag right'>{end_tag_text}</div>
-        <div class='title'>{title}</div>
-        <div class='ld-wrapper'>
-            <div class='ld-block'><span class='label'>적하</span><span class='value'>{format_qty_value(row.get('load_qty'))}</span></div>
-            <div class='ld-block'><span class='label'>양하</span><span class='value'>{format_qty_value(row.get('discharge_qty'))}</span></div>
-            <div class='ld-block'><span class='label'>S/H</span><span class='value'>{format_qty_value(row.get('sh_qty'))}</span></div>
-            <div class='ld-block'><span class='label'>전배</span><span class='value'>{format_qty_value(row.get('transfer_qty'))}</span></div>
-        </div>
-        <div class='badge'>{badge_text}</div>
+    <div class='berth-item-card'>
+        <div class='time-row'><span>{start_text}</span><span>{end_text}</span></div>
+        <div class='marker-text top'>검역</div>
+        <div class='vessel-name'>{vessel}</div>
+        <div class='marker-text bottom'>도선</div>
+        {chip_html}
     </div>
     """
 
@@ -462,11 +550,18 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
         f"선박: {title}",
         f"ETA: {pd.Timestamp(row.get('eta')).strftime('%Y-%m-%d %H:%M') if pd.notna(row.get('eta')) else ''}",
         f"ETD: {pd.Timestamp(row.get('etd')).strftime('%Y-%m-%d %H:%M') if pd.notna(row.get('etd')) else ''}",
-        load_block,
-        discharge_block,
-        sh_block,
-        transfer_block,
     ]
+    if length_text:
+        tooltip_parts.append(f"길이: {length_text}")
+    if bp_text:
+        tooltip_parts.append(f"B.P.: {bp_text}")
+    start_meter = row.get("start_meter")
+    end_meter = row.get("end_meter")
+    if start_meter is not None and end_meter is not None and not pd.isna(start_meter) and not pd.isna(end_meter):
+        tooltip_parts.append(
+            f"배치 구간: {int(start_meter)}m ~ {int(end_meter)}m"
+        )
+
     tooltip = "<br/>".join([part for part in tooltip_parts if part])
     return html, tooltip
 
@@ -502,6 +597,11 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     for col in ("eta", "etd"):
         if col in work.columns:
             work[col] = to_datetime(work[col])
+    for col in ("start_meter", "end_meter", "loa_m", "length_m", "f_pos", "e_pos"):
+        if col in work.columns:
+            work[col] = pd.to_numeric(work[col], errors="coerce")
+    if "bp_raw" in work.columns:
+        work["bp_raw"] = work["bp_raw"].astype(str)
     if "berth" in work.columns:
         work["berth"] = work["berth"].astype(str)
     return work
@@ -546,6 +646,44 @@ def render_berth_gantt(
         st.info("선택한 조건에 해당하는 선석 일정이 없습니다.")
         return prepared, None
 
+    spacing_conflicts = collect_spacing_conflicts(view_df)
+    gap_flags = mark_spacing_warnings(view_df, conflicts=spacing_conflicts)
+    gap_flags_map = gap_flags.to_dict()
+
+    if spacing_conflicts:
+        conflict_texts = []
+        for conflict in spacing_conflicts:
+            berth = conflict.get("berth")
+            gap = conflict.get("gap")
+            prev_v = conflict.get("previous_vessel") or "-"
+            curr_v = conflict.get("current_vessel") or "-"
+            prev_range = conflict.get("previous_range")
+            curr_range = conflict.get("current_range")
+            gap_display = f"{gap:.1f}m" if isinstance(gap, (int, float)) else ""
+            if (
+                isinstance(prev_range, tuple)
+                and len(prev_range) == 2
+                and all(val is not None and not pd.isna(val) for val in prev_range)
+            ):
+                prev_range_txt = f"{int(prev_range[0])}~{int(prev_range[1])}m"
+            else:
+                prev_range_txt = ""
+            if (
+                isinstance(curr_range, tuple)
+                and len(curr_range) == 2
+                and all(val is not None and not pd.isna(val) for val in curr_range)
+            ):
+                curr_range_txt = f"{int(curr_range[0])}~{int(curr_range[1])}m"
+            else:
+                curr_range_txt = ""
+            conflict_texts.append(
+                f"{berth}선석 {prev_v}({prev_range_txt}) ↔ {curr_v}({curr_range_txt}) : 간격 {gap_display}"
+            )
+        st.warning(
+            "배 간격 30m 미만 선박이 있습니다:\n- " + "\n- ".join(conflict_texts),
+            icon="⚠️",
+        )
+
     groups = [
         {"id": str(berth), "content": str(berth)}
         for berth in range(berth_min, berth_max + 1)
@@ -563,6 +701,8 @@ def render_berth_gantt(
         item_id = str(idx)
         id_to_index[item_id] = idx
 
+        height_px = compute_item_height(row)
+        item_class = "berth-item gap-warning" if bool(gap_flags_map.get(idx, False)) else "berth-item"
         items.append(
             {
                 "id": item_id,
@@ -571,15 +711,15 @@ def render_berth_gantt(
                 "end": end,
                 "content": content_html,
                 "title": tooltip,
-                "style": f"background-color: {resolve_background_color(row)};",
-                "className": "berth-item",
+                "style": f"background-color: {resolve_background_color(row)}; height: {height_px}px;",
+                "className": item_class,
                 "type": "range",
                 "data": row_to_jsonable(row),
             }
         )
 
     options = {
-        "stack": False,
+        "stack": True,
         "editable": {
             "updateTime": True,
             "updateGroup": True,
@@ -591,14 +731,18 @@ def render_berth_gantt(
         "groupEditable": False,
         "min": view_start.isoformat(),
         "max": view_end.isoformat(),
+        "start": base_ts.isoformat(),
+        "end": (base_ts + pd.Timedelta(days=days)).isoformat(),
         "orientation": {"axis": "top"},
-        "margin": {"item": 6, "axis": 12},
+        "margin": {"item": 12, "axis": 12},
         "multiselect": False,
         "moveable": True,
         "zoomable": True,
         "zoomKey": "ctrlKey",
         "zoomMin": 1000 * 60 * 15,
         "zoomMax": 1000 * 60 * 60 * 24 * 30,
+        "verticalScroll": True,
+        "horizontalScroll": True,
         "timeAxis": {"scale": "day", "step": 1},
         "locale": "ko",
     }
@@ -850,6 +994,7 @@ with st.sidebar:
     operator_filter = st.text_input("선사 필터", value="")
     route_filter = st.text_input("항로 필터", value="")
     snap_choice = st.radio("시간 스냅", ["1h", "30m", "15m"], index=0, horizontal=True)
+    timeline_days = st.slider("타임라인 표시 기간(일)", min_value=3, max_value=14, value=7, step=1)
 
     if st.button("↩ 되돌리기", use_container_width=True):
         history: List[pd.DataFrame] = st.session_state.get("history", [])
@@ -910,7 +1055,7 @@ else:
         updated_df, event_payload = render_berth_gantt(
             filtered_df,
             base_date=base_date,
-            days=7,
+            days=timeline_days,
             editable=True,
             snap_choice=snap_choice,
             berth_range=(1, 5),
@@ -935,7 +1080,7 @@ else:
         updated_df, event_payload = render_berth_gantt(
             filtered_df,
             base_date=base_date,
-            days=7,
+            days=timeline_days,
             editable=True,
             snap_choice=snap_choice,
             berth_range=(6, 9),
