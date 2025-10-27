@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
@@ -19,13 +20,23 @@ def _load_crawling_main() -> ModuleType:
     if not module_path.is_file():
         raise FileNotFoundError(f"crawling 모듈을 찾을 수 없습니다: {module_path}")
 
-    spec = importlib.util.spec_from_file_location("crawling_main", module_path)
-    if spec is None or spec.loader is None:
-        raise ImportError("crawling 메인 모듈 spec을 생성할 수 없습니다.")
+    module_dir = str(module_path.parent)
+    path_added = False
+    if module_dir not in sys.path:
+        sys.path.insert(0, module_dir)
+        path_added = True
 
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    try:
+        spec = importlib.util.spec_from_file_location("crawling_main", module_path)
+        if spec is None or spec.loader is None:
+            raise ImportError("crawling 메인 모듈 spec을 생성할 수 없습니다.")
+
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        if path_added and module_dir in sys.path:
+            sys.path.remove(module_dir)
 
 
 def collect_crawling_dataframe(*, time: str = "3days", route: str = "ALL", berth: str = "A", debug: bool = False) -> pd.DataFrame:
