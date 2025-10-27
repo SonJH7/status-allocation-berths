@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import io
 from datetime import datetime, timedelta
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 from streamlit_timeline import st_timeline
+
+import numpy as np
 
 # ------------------------------------------------------------
 # 상수 정의
@@ -109,6 +111,29 @@ def to_datetime(series: pd.Series) -> pd.Series:
 
 def to_numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
+
+
+def ensure_jsonable_value(value: object) -> object:
+    """vis.js item data에 포함될 값을 JSON 직렬화 가능 형태로 변환."""
+
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return None if pd.isna(value) else value.isoformat()
+    if isinstance(value, (pd.Timedelta, timedelta)):
+        return None if pd.isna(value) else value.isoformat()
+    if isinstance(value, np.generic):
+        if isinstance(value, np.bool_):
+            return bool(value)
+        if isinstance(value, np.integer):
+            return int(value)
+        if isinstance(value, np.floating):
+            return float(value)
+    if pd.isna(value):
+        return None
+    return value
+
+
+def row_to_jsonable(row: pd.Series) -> Dict[str, Any]:
+    return {key: ensure_jsonable_value(val) for key, val in row.items()}
 
 
 @st.cache_data(show_spinner=False)
@@ -445,6 +470,30 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
     tooltip = "<br/>".join([part for part in tooltip_parts if part])
     return html, tooltip
 
+    options = {
+        "stack": False,
+        "editable": {
+            "updateTime": True,
+            "updateGroup": True,
+            "remove": False,
+            "add": False,
+        }
+        if editable
+        else False,
+        "groupEditable": False,
+        "min": view_start.isoformat(),
+        "max": view_end.isoformat(),
+        "orientation": {"axis": "top"},
+        "margin": {"item": 6, "axis": 12},
+        "multiselect": False,
+        "moveable": True,
+        "zoomable": True,
+        "zoomKey": "ctrlKey",
+        "zoomMin": 1000 * 60 * 15,
+        "zoomMax": 1000 * 60 * 60 * 24 * 30,
+        "timeAxis": {"scale": "day", "step": 1},
+        "locale": "ko",
+    }
 
 def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -525,7 +574,7 @@ def render_berth_gantt(
                 "style": f"background-color: {resolve_background_color(row)};",
                 "className": "berth-item",
                 "type": "range",
-                "data": row.to_dict(),
+                "data": row_to_jsonable(row),
             }
         )
 
