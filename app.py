@@ -482,17 +482,24 @@ def ensure_timeline_css() -> None:
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            gap: 2px;
-            padding: 6px 8px 8px 8px;
+            gap: 4px;
+            padding: 24px 10px 12px 10px;
             box-sizing: border-box;
         }}
-        .berth-item-card .time-row {{
-            display: flex;
-            width: 100%;
-            justify-content: space-between;
+        .berth-item-card .time-label {{
+            position: absolute;
+            top: 6px;
             font-size: 12px;
             font-weight: 700;
             color: #0f2d4c;
+        }}
+        .berth-item-card .time-label.start {{
+            left: 10px;
+            text-align: left;
+        }}
+        .berth-item-card .time-label.end {{
+            right: 10px;
+            text-align: right;
         }}
         .berth-item-card .vessel-name {{
             text-align: center;
@@ -602,14 +609,6 @@ def extract_marker_label(row: pd.Series, keys: Iterable[str]) -> str:
 
 
 def extract_meter_range(row: pd.Series) -> Tuple[Optional[float], Optional[float]]:
-    start = row.get("start_meter")
-    end = row.get("end_meter")
-
-    if start is None or pd.isna(start):
-        start = row.get("f_pos")
-    if end is None or pd.isna(end):
-        end = row.get("e_pos")
-
     def _to_float(value) -> Optional[float]:
         if value is None or pd.isna(value):
             return None
@@ -618,27 +617,18 @@ def extract_meter_range(row: pd.Series) -> Tuple[Optional[float], Optional[float
         except (TypeError, ValueError):
             return None
 
-    return _to_float(start), _to_float(end)
+    values: List[float] = []
+    for key in ("start_meter", "end_meter", "f_pos", "e_pos"):
+        converted = _to_float(row.get(key))
+        if converted is not None:
+            values.append(converted)
 
+    if not values:
+        return None, None
 
-def extract_meter_range(row: pd.Series) -> Tuple[Optional[float], Optional[float]]:
-    start = row.get("start_meter")
-    end = row.get("end_meter")
-
-    if start is None or pd.isna(start):
-        start = row.get("f_pos")
-    if end is None or pd.isna(end):
-        end = row.get("e_pos")
-
-    def _to_float(value) -> Optional[float]:
-        if value is None or pd.isna(value):
-            return None
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
-    return _to_float(start), _to_float(end)
+    lower = min(values)
+    upper = max(values)
+    return lower, upper
 
 
 def compute_item_height(row: pd.Series) -> float:
@@ -663,10 +653,31 @@ def compute_item_height(row: pd.Series) -> float:
 
 
 def compute_item_offset(row: pd.Series, item_height: float) -> float:
-    start_meter, end_meter = extract_meter_range(row)
-    anchor = start_meter if start_meter is not None else end_meter
-    if anchor is None:
+    def _to_float(value) -> Optional[float]:
+        if value is None or pd.isna(value):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    anchor_candidates: List[float] = []
+
+    for key in ("f_pos", "e_pos"):
+        converted = _to_float(row.get(key))
+        if converted is not None:
+            anchor_candidates.append(converted)
+
+    if not anchor_candidates:
+        start_meter, end_meter = extract_meter_range(row)
+        for candidate in (start_meter, end_meter):
+            if candidate is not None:
+                anchor_candidates.append(candidate)
+
+    if not anchor_candidates:
         return 0.0
+
+    anchor = max(anchor_candidates)
 
     offset = BP_BASELINE_M - anchor
     if offset < 0:
@@ -797,10 +808,21 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
     )
 
     vessel_html = html.escape(vessel)
+    start_label_html = (
+        f"<div class='time-label start'>{html.escape(start_text)}</div>"
+        if start_text
+        else ""
+    )
+    end_label_html = (
+        f"<div class='time-label end'>{html.escape(end_text)}</div>"
+        if end_text
+        else ""
+    )
 
     html_t = f"""
     <div class='berth-item-card'>
-        <div class='time-row'><span>{start_text}</span><span>{end_text}</span></div>
+        {start_label_html}
+        {end_label_html}
         {marker_top_html}
         <div class='vessel-name'>{vessel_html}</div>
         {marker_bottom_html}
@@ -1552,6 +1574,25 @@ else:
                     else min(5, len(table_df.columns))
                 )
                 table_df.insert(insert_at, "E", table_df["e_pos"])
+            length_source_col: Optional[str] = None
+            if "loa_m" in table_df.columns:
+                length_source_col = "loa_m"
+            elif "length_m" in table_df.columns:
+                length_source_col = "length_m"
+            if length_source_col and "Length(m)" not in table_df.columns:
+                if "E" in table_df.columns:
+                    length_insert_at = table_df.columns.get_loc("E") + 1
+                elif "F" in table_df.columns:
+                    length_insert_at = table_df.columns.get_loc("F") + 1
+                elif "bp" in table_df.columns:
+                    length_insert_at = table_df.columns.get_loc("bp") + 1
+                else:
+                    length_insert_at = min(6, len(table_df.columns))
+                table_df.insert(
+                    length_insert_at,
+                    "Length(m)",
+                    table_df[length_source_col],
+                )
         st.dataframe(table_df, use_container_width=True)
 
     diff_df = compute_diff(st.session_state.get("raw_df"), working_df_after)
