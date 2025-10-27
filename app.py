@@ -16,8 +16,7 @@ from streamlit_timeline import st_timeline
 from bptc_vslmsg import fetch_bptc_g_vslmsg
 
 import numpy as np
-from db import SessionLocal, get_vessel_loa_map
-
+from db import SessionLocal, get_vessel_loa_map, _normalize_berth_code as normalize_berth_code
 # ------------------------------------------------------------
 # 상수 정의
 # ------------------------------------------------------------
@@ -247,6 +246,40 @@ def fetch_bptc_dataframe(v_time: str = "7days", start_day: Optional[str] = None)
         df["loa_m"] = df["length_m"]
 
     return df
+
+def attach_vessel_loa(df: pd.DataFrame) -> pd.DataFrame:
+    """데이터프레임에 선박 LOA 정보를 결합한다."""
+
+    if df is None or df.empty or "vessel" not in df.columns:
+        return df
+
+    vessels = (
+        df["vessel"].dropna().astype(str).str.strip()
+    )
+    vessels = vessels[vessels != ""]
+    if vessels.empty:
+        return df
+
+    session = SessionLocal()
+    try:
+        loa_map = get_vessel_loa_map(session, vessels.unique())
+    finally:
+        session.close()
+
+    if not loa_map:
+        return df
+
+    enriched = df.copy()
+    vessel_key = enriched["vessel"].astype(str).str.strip()
+    loa_series = vessel_key.map(loa_map)
+
+    if "loa_m" in enriched.columns:
+        missing_mask = enriched["loa_m"].isna()
+        enriched.loc[missing_mask, "loa_m"] = loa_series[missing_mask]
+    else:
+        enriched["loa_m"] = loa_series
+
+    return enriched
 
 
 @st.cache_data(show_spinner=False)
