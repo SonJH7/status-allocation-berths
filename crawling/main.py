@@ -5,8 +5,13 @@
 """
 
 import pandas as pd
-from bpt import get_berth_status, add_bp_to_dataframe
-from vsfinder import enrich_with_length_beam
+
+try:  # 패키지로 임포트될 때
+    from .bpt import get_berth_status, add_bp_to_dataframe
+    from .vsfinder import enrich_with_length_beam
+except ImportError:  # pragma: no cover - 단독 실행 시 폴백
+    from bpt import get_berth_status, add_bp_to_dataframe
+    from vsfinder import enrich_with_length_beam
 
 
 def collect_berth_info(time="3days", route="ALL", berth="A", debug=False):

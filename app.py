@@ -2,35 +2,28 @@
 # Streamlit + vis.js 타임라인 기반 BPTC 선석 현황 보드
 from __future__ import annotations
 
-import html
 import io
+import html
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
-import requests
 import streamlit as st
-from bs4 import BeautifulSoup
 from streamlit_timeline import st_timeline
 
 from bptc_vslmsg import fetch_bptc_g_vslmsg
+from crawling.main import collect_berth_info
 
 import numpy as np
 
 # ------------------------------------------------------------
 # 상수 정의
 # ------------------------------------------------------------
-BPTC_ENDPOINT = "https://info.bptc.co.kr/Berth_status_text_servlet_sw_kr"
 BPTC_FORM_PAYLOAD = {
     "v_time": "3days",
     "ROCD": "ALL",
     "ORDER": "item3",
     "v_gu": "A",
-}
-HTTP_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Referer": "https://info.bptc.co.kr/content/sw/frame/berth_status_text_frame_sw_kr.jsp",
 }
 
 COLUMN_RENAME_MAP = {
@@ -51,10 +44,24 @@ COLUMN_RENAME_MAP = {
     "전배": "transfer_qty",
     "항로": "route",
     "검역": "quarantine_flag",
+    "Length(m)": "length_m",
+    "Beam(m)": "beam_m",
+    "f": "f_pos",
+    "e": "e_pos",
 }
 
 TIME_COLUMNS = ["eta_plan", "eta", "work_complete", "etd", "inbound_cutoff"]
-NUMERIC_COLUMNS = ["discharge_qty", "load_qty", "sh_qty", "transfer_qty"]
+NUMERIC_COLUMNS = [
+    "discharge_qty",
+    "load_qty",
+    "sh_qty",
+    "transfer_qty",
+    "length_m",
+    "beam_m",
+    "bp",
+    "f_pos",
+    "e_pos",
+]
 
 PASTEL_COLORS = {
     "gray": "#d9d9d9",
@@ -91,6 +98,13 @@ AXIS_BACKGROUND_COLOR = "#e5f3ff"
 
 BP_BASELINE_M = 1500.0
 BERTH_VERTICAL_SPAN_PX = 300.0
+BERTH_METER_RANGES: Dict[str, Tuple[float, float]] = {
+    "1": (0.0, 300.0),
+    "2": (301.0, 600.0),
+    "3": (601.0, 900.0),
+    "4": (901.0, 1200.0),
+    "5": (1200.0, 1500.0),
+}
 QUARANTINE_MARKER_KEYS = ("quarantine_flag", "quarantine", "검역")
 PILOT_MARKER_KEYS = ("pilot_flag", "pilotage_flag", "pilotage", "pilot", "pilot_text", "도선")
 
@@ -159,29 +173,28 @@ def row_to_jsonable(row: pd.Series) -> Dict[str, Any]:
 
 @st.cache_data(show_spinner=False)
 def fetch_bptc_dataframe() -> pd.DataFrame:
-    """BPTC 텍스트 서블릿에서 테이블 전체를 크롤링."""
+    """crawling 패키지 기반 데이터프레임을 정규화하여 반환."""
 
-    response = requests.post(
-        BPTC_ENDPOINT,
-        data=BPTC_FORM_PAYLOAD,
-        headers=HTTP_HEADERS,
-        timeout=20,
-    )
-    response.encoding = "euc-kr"
-    if response.status_code != 200:
-        raise RuntimeError(f"BPTC 요청 실패: {response.status_code}")
+    try:
+        df = collect_berth_info(
+            time=BPTC_FORM_PAYLOAD.get("v_time", "3days"),
+            route=BPTC_FORM_PAYLOAD.get("ROCD", "ALL"),
+            berth=BPTC_FORM_PAYLOAD.get("v_gu", "A"),
+            debug=False,
+        )
+    except Exception as exc:  # pragma: no cover - 외부 API 오류 래핑
+        raise RuntimeError(f"crawling.collect_berth_info 호출 실패: {exc}") from exc
 
-    soup = BeautifulSoup(response.text, "lxml")
-    tables = pd.read_html(io.StringIO(str(soup)), flavor="lxml")
-    if not tables:
-        raise RuntimeError("테이블을 찾을 수 없습니다.")
+    if not isinstance(df, pd.DataFrame):
+        raise RuntimeError("collect_berth_info가 DataFrame을 반환하지 않았습니다.")
 
-    candidate = max(tables, key=lambda tbl: tbl.shape[1])
-    df = normalize_column_names(candidate)
+    if df.empty:
+        return df
+
+    df = normalize_column_names(df)
 
     if "berth" in df.columns:
         df["berth"] = df["berth"].astype(str).str.extract(r"(\d+)").iloc[:, 0]
-    if "berth" in df.columns:
         df = df[~df["berth"].isna()].copy()
 
     for col in TIME_COLUMNS:
@@ -191,6 +204,39 @@ def fetch_bptc_dataframe() -> pd.DataFrame:
         if col in df.columns:
             df[col] = to_numeric(df[col])
 
+    if {"bp", "f_pos", "e_pos"}.intersection(df.columns):
+        def _format_bp(row: pd.Series) -> str | None:
+            bp_val = row.get("bp")
+            f_val = row.get("f_pos")
+            e_val = row.get("e_pos")
+            if pd.isna(bp_val) and pd.isna(f_val) and pd.isna(e_val):
+                return None
+            parts: list[str] = []
+            if pd.notna(bp_val):
+                try:
+                    parts.append(str(int(float(bp_val))))
+                except (TypeError, ValueError):
+                    parts.append(str(bp_val))
+            detail: list[str] = []
+            if pd.notna(f_val):
+                try:
+                    detail.append(f"F: {int(float(f_val))}")
+                except (TypeError, ValueError):
+                    detail.append(f"F: {f_val}")
+            if pd.notna(e_val):
+                try:
+                    detail.append(f"E: {int(float(e_val))}")
+                except (TypeError, ValueError):
+                    detail.append(f"E: {e_val}")
+            if detail:
+                parts.append(f"( {', '.join(detail)} )")
+            return " ".join(parts) if parts else None
+
+        bp_text = df.apply(_format_bp, axis=1)
+        df["bp_raw"] = bp_text
+        if "bitt" not in df.columns:
+            df["bitt"] = bp_text
+
     if "quarantine_flag" in df.columns:
         df["quarantine_flag"] = df["quarantine_flag"].fillna("").astype(str)
     if "mooring_type" in df.columns:
@@ -198,38 +244,60 @@ def fetch_bptc_dataframe() -> pd.DataFrame:
     if "berth" in df.columns:
         df["berth"] = df["berth"].astype(str)
 
-    try:
-        vslmsg_df = fetch_vslmsg_dataframe()
-    except Exception as exc:
-        print(f"⚠️ VslMsg 데이터 병합 실패: {exc}")
-        vslmsg_df = pd.DataFrame()
+    if "bp_raw" in df.columns and "bitt" not in df.columns:
+        df["bitt"] = df["bp_raw"]
+    if "bitt" in df.columns:
+        df["bitt"] = df["bitt"].astype(str)
+    if "bp_raw" in df.columns:
+        df["bp_raw"] = df["bp_raw"].astype(str)
 
-    if not vslmsg_df.empty:
-        vslmsg_df = vslmsg_df.copy()
-        vslmsg_df["start_meter"] = vslmsg_df[["f_pos", "e_pos"]].min(axis=1)
-        vslmsg_df["end_meter"] = vslmsg_df[["f_pos", "e_pos"]].max(axis=1)
-        merge_keys = [key for key in ("voyage", "vessel") if key in df.columns and key in vslmsg_df.columns]
-        if not merge_keys:
-            merge_keys = ["vessel"]
-        vslmsg_compact = vslmsg_df.drop_duplicates(subset=merge_keys)
-        extra_cols = [
-            col
-            for col in ["bitt", "bp_raw", "f_pos", "e_pos", "length_m", "start_meter", "end_meter"]
-            if col in vslmsg_compact.columns
-        ]
-        df = df.merge(vslmsg_compact[merge_keys + extra_cols], on=merge_keys, how="left")
+    needs_vslmsg = False
+    if "f_pos" not in df.columns or df["f_pos"].isna().all():
+        needs_vslmsg = True
+    if "e_pos" not in df.columns or df["e_pos"].isna().all():
+        needs_vslmsg = True
+    if "bitt" not in df.columns or df["bitt"].replace("", pd.NA).isna().all():
+        needs_vslmsg = True
 
-        missing_mask = df.get("length_m").isna() if "length_m" in df.columns else pd.Series(False, index=df.index)
-        if missing_mask.any():
-            fallback = vslmsg_df.dropna(subset=["length_m"]).drop_duplicates(subset=["vessel"])
-            fallback = fallback.set_index("vessel")
-            for col in ["bitt", "bp_raw", "f_pos", "e_pos", "length_m", "start_meter", "end_meter"]:
-                if col not in df.columns:
-                    df[col] = None
-                if col in fallback.columns:
-                    df.loc[missing_mask, col] = df.loc[missing_mask, "vessel"].map(fallback[col])
+    if needs_vslmsg:
+        try:
+            vslmsg_df = fetch_vslmsg_dataframe()
+        except Exception as exc:
+            print(f"⚠️ VslMsg 데이터 병합 실패: {exc}")
+            vslmsg_df = pd.DataFrame()
 
-    if "start_meter" not in df.columns and {"f_pos", "e_pos"}.issubset(df.columns):
+        if not vslmsg_df.empty:
+            vslmsg_df = vslmsg_df.copy()
+            vslmsg_df["start_meter"] = vslmsg_df[["f_pos", "e_pos"]].min(axis=1)
+            vslmsg_df["end_meter"] = vslmsg_df[["f_pos", "e_pos"]].max(axis=1)
+            merge_keys = [key for key in ("voyage", "vessel") if key in df.columns and key in vslmsg_df.columns]
+            if not merge_keys:
+                merge_keys = ["vessel"]
+            vslmsg_compact = vslmsg_df.drop_duplicates(subset=merge_keys)
+            extra_cols = [
+                col
+                for col in ["bitt", "bp_raw", "f_pos", "e_pos", "length_m", "start_meter", "end_meter"]
+                if col in vslmsg_compact.columns
+            ]
+            merged = df.merge(
+                vslmsg_compact[merge_keys + extra_cols],
+                on=merge_keys,
+                how="left",
+                suffixes=("", "_vslmsg"),
+            )
+
+            for col in extra_cols:
+                fallback_col = f"{col}_vslmsg"
+                if fallback_col not in merged.columns:
+                    continue
+                if col in merged.columns:
+                    merged[col] = merged[col].combine_first(merged[fallback_col])
+                else:
+                    merged[col] = merged[fallback_col]
+                merged = merged.drop(columns=[fallback_col])
+            df = merged
+
+    if {"f_pos", "e_pos"}.issubset(df.columns):
         df["start_meter"] = df[["f_pos", "e_pos"]].min(axis=1)
         df["end_meter"] = df[["f_pos", "e_pos"]].max(axis=1)
 
@@ -422,17 +490,24 @@ def ensure_timeline_css() -> None:
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            gap: 2px;
-            padding: 6px 8px 8px 8px;
+            gap: 4px;
+            padding: 24px 10px 12px 10px;
             box-sizing: border-box;
         }}
-        .berth-item-card .time-row {{
-            display: flex;
-            width: 100%;
-            justify-content: space-between;
+        .berth-item-card .time-label {{
+            position: absolute;
+            top: 6px;
             font-size: 12px;
             font-weight: 700;
             color: #0f2d4c;
+        }}
+        .berth-item-card .time-label.start {{
+            left: 10px;
+            text-align: left;
+        }}
+        .berth-item-card .time-label.end {{
+            right: 10px;
+            text-align: right;
         }}
         .berth-item-card .vessel-name {{
             text-align: center;
@@ -542,14 +617,6 @@ def extract_marker_label(row: pd.Series, keys: Iterable[str]) -> str:
 
 
 def extract_meter_range(row: pd.Series) -> Tuple[Optional[float], Optional[float]]:
-    start = row.get("start_meter")
-    end = row.get("end_meter")
-
-    if start is None or pd.isna(start):
-        start = row.get("f_pos")
-    if end is None or pd.isna(end):
-        end = row.get("e_pos")
-
     def _to_float(value) -> Optional[float]:
         if value is None or pd.isna(value):
             return None
@@ -558,35 +625,50 @@ def extract_meter_range(row: pd.Series) -> Tuple[Optional[float], Optional[float
         except (TypeError, ValueError):
             return None
 
-    return _to_float(start), _to_float(end)
+    values: List[float] = []
+    for key in ("start_meter", "end_meter", "f_pos", "e_pos"):
+        converted = _to_float(row.get(key))
+        if converted is not None:
+            values.append(converted)
+
+    if not values:
+        return None, None
+
+    lower = min(values)
+    upper = max(values)
+    return lower, upper
 
 
-def extract_meter_range(row: pd.Series) -> Tuple[Optional[float], Optional[float]]:
-    start = row.get("start_meter")
-    end = row.get("end_meter")
+def get_berth_meter_range(berth_value: object) -> Optional[Tuple[float, float]]:
+    if berth_value is None or pd.isna(berth_value):
+        return None
+    key = str(berth_value).strip()
+    if not key:
+        return None
+    return BERTH_METER_RANGES.get(key)
 
-    if start is None or pd.isna(start):
-        start = row.get("f_pos")
-    if end is None or pd.isna(end):
-        end = row.get("e_pos")
 
-    def _to_float(value) -> Optional[float]:
-        if value is None or pd.isna(value):
-            return None
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
-    return _to_float(start), _to_float(end)
+def resolve_berth_span(row: pd.Series) -> Optional[float]:
+    berth_range = get_berth_meter_range(row.get("berth"))
+    if berth_range is None:
+        return None
+    start, end = berth_range
+    if start is None or end is None:
+        return None
+    span = float(end - start)
+    if span <= 0:
+        return None
+    return span
 
 
 def compute_item_height(row: pd.Series) -> float:
+    berth_span = resolve_berth_span(row)
+    max_height = berth_span if berth_span is not None else BERTH_VERTICAL_SPAN_PX
     start_meter, end_meter = extract_meter_range(row)
     if start_meter is not None and end_meter is not None:
         span = abs(end_meter - start_meter)
         if span > 0:
-            return float(max(24.0, min(BERTH_VERTICAL_SPAN_PX, span)))
+            return float(max(24.0, min(max_height, span)))
 
     length_val = row.get("loa_m")
     if length_val is None or pd.isna(length_val):
@@ -599,20 +681,57 @@ def compute_item_height(row: pd.Series) -> float:
     if numeric is None or pd.isna(numeric):
         return 86.0
     scaled = numeric
-    return float(max(24.0, min(BERTH_VERTICAL_SPAN_PX, scaled)))
+    return float(max(24.0, min(max_height, scaled)))
 
 
 def compute_item_offset(row: pd.Series, item_height: float) -> float:
-    start_meter, end_meter = extract_meter_range(row)
-    anchor = start_meter if start_meter is not None else end_meter
-    if anchor is None:
+    def _to_float(value) -> Optional[float]:
+        if value is None or pd.isna(value):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    anchor_candidates: List[float] = []
+
+    for key in ("f_pos", "e_pos"):
+        converted = _to_float(row.get(key))
+        if converted is not None:
+            anchor_candidates.append(converted)
+
+    if not anchor_candidates:
+        start_meter, end_meter = extract_meter_range(row)
+        for candidate in (start_meter, end_meter):
+            if candidate is not None:
+                anchor_candidates.append(candidate)
+
+    if not anchor_candidates:
         return 0.0
 
-    offset = BP_BASELINE_M - anchor
-    if offset < 0:
-        offset = 0.0
+    anchor = max(anchor_candidates)
 
-    max_offset = max(0.0, BERTH_VERTICAL_SPAN_PX - item_height)
+    berth_range = get_berth_meter_range(row.get("berth"))
+    if berth_range is not None:
+        start, end = berth_range
+        range_span = None
+        if start is not None and end is not None:
+            anchor = min(max(anchor, float(start)), float(end))
+            range_span = float(end - start) if end > start else None
+            baseline = float(end)
+        else:
+            baseline = BP_BASELINE_M
+        offset = baseline - anchor
+        if offset < 0:
+            offset = 0.0
+        max_span = range_span if range_span is not None and range_span > 0 else BERTH_VERTICAL_SPAN_PX
+        max_offset = max(0.0, max_span - item_height)
+    else:
+        offset = BP_BASELINE_M - anchor
+        if offset < 0:
+            offset = 0.0
+        max_offset = max(0.0, BERTH_VERTICAL_SPAN_PX - item_height)
+
     if offset > max_offset:
         offset = max_offset
     return float(offset)
@@ -737,10 +856,21 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
     )
 
     vessel_html = html.escape(vessel)
+    start_label_html = (
+        f"<div class='time-label start'>{html.escape(start_text)}</div>"
+        if start_text
+        else ""
+    )
+    end_label_html = (
+        f"<div class='time-label end'>{html.escape(end_text)}</div>"
+        if end_text
+        else ""
+    )
 
     html_t = f"""
     <div class='berth-item-card'>
-        <div class='time-row'><span>{start_text}</span><span>{end_text}</span></div>
+        {start_label_html}
+        {end_label_html}
         {marker_top_html}
         <div class='vessel-name'>{vessel_html}</div>
         {marker_bottom_html}
@@ -893,9 +1023,9 @@ def render_berth_gantt(
     spacing_conflicts = collect_spacing_conflicts(view_df)
     gap_flags = mark_spacing_warnings(view_df, conflicts=spacing_conflicts)
     gap_flags_map = gap_flags.to_dict()
+    conflict_texts: List[str] = []
 
     if spacing_conflicts:
-        conflict_texts = []
         for conflict in spacing_conflicts:
             berth = conflict.get("berth")
             gap = conflict.get("gap")
@@ -923,18 +1053,28 @@ def render_berth_gantt(
             conflict_texts.append(
                 f"{berth}선석 {prev_v}({prev_range_txt}) ↔ {curr_v}({curr_range_txt}) : 간격 {gap_display}"
             )
-        st.warning(
-            "배 간격 30m 미만 선박이 있습니다:\n- " + "\n- ".join(conflict_texts),
-            icon="⚠️",
-        )
+
+    resolved_group_label_map: Dict[str, str] = {}
+    if group_label_map is not None:
+        resolved_group_label_map = {
+            str(key): value for key, value in group_label_map.items()
+        }
 
     groups = []
     for berth in berth_order:
         label_value = (
-            group_label_map.get(str(berth))
-            if group_label_map is not None
+            resolved_group_label_map.get(str(berth))
+            if resolved_group_label_map
             else None
         )
+        if not label_value:
+            berth_range = get_berth_meter_range(berth)
+            if berth_range is not None:
+                start, end = berth_range
+                start_txt = f"{int(start)}" if start is not None else ""
+                end_txt = f"{int(end)}" if end is not None else ""
+                if start_txt or end_txt:
+                    label_value = f"{berth} ({start_txt}~{end_txt}m)"
         display_label = label_value if label_value else berth
         groups.append(
             {
@@ -1078,6 +1218,15 @@ def render_berth_gantt(
     }
 
     event_result = st_timeline(items, groups, options, height=height, key=key)
+
+    if conflict_texts:
+        toggle_label = f"⚠️ 배 간격 30m 미만 선박 경고 보기 ({len(conflict_texts)}건)"
+        toggle_key = f"{key}_spacing_warning_toggle"
+        show_conflicts = st.toggle(toggle_label, value=False, key=toggle_key)
+        if show_conflicts:
+            st.warning("배 간격 30m 미만 선박이 있습니다.", icon="⚠️")
+            for text in conflict_texts:
+                st.markdown(f"- {text}")
 
     updated = prepared.copy()
     event_payload: Optional[Dict] = None
@@ -1492,6 +1641,25 @@ else:
                     else min(5, len(table_df.columns))
                 )
                 table_df.insert(insert_at, "E", table_df["e_pos"])
+            length_source_col: Optional[str] = None
+            if "loa_m" in table_df.columns:
+                length_source_col = "loa_m"
+            elif "length_m" in table_df.columns:
+                length_source_col = "length_m"
+            if length_source_col and "Length(m)" not in table_df.columns:
+                if "E" in table_df.columns:
+                    length_insert_at = table_df.columns.get_loc("E") + 1
+                elif "F" in table_df.columns:
+                    length_insert_at = table_df.columns.get_loc("F") + 1
+                elif "bp" in table_df.columns:
+                    length_insert_at = table_df.columns.get_loc("bp") + 1
+                else:
+                    length_insert_at = min(6, len(table_df.columns))
+                table_df.insert(
+                    length_insert_at,
+                    "Length(m)",
+                    table_df[length_source_col],
+                )
         st.dataframe(table_df, use_container_width=True)
 
     diff_df = compute_diff(st.session_state.get("raw_df"), working_df_after)
