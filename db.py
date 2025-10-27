@@ -3,7 +3,7 @@
 import os
 import uuid
 from datetime import datetime
-from typing import List, Dict
+from typing import Dict, Iterable, List
 
 import pandas as pd
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Float, text
@@ -53,6 +53,30 @@ class Assignment(Base):
     vessel = relationship("Vessel")
     berth = relationship("Berth")
 
+
+def _normalize_berth_code(value) -> str:
+    if value is None:
+        return ""
+
+    text = str(value).strip()
+    if not text:
+        return ""
+
+    if "(" in text and ")" in text:
+        start = text.find("(") + 1
+        end = text.find(")", start)
+        if end > start:
+            inside = "".join(ch for ch in text[start:end] if ch.isdigit())
+            if inside:
+                return str(int(inside))
+
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if digits:
+        return str(int(digits))
+
+    return text
+
+
 def init_db():
     Base.metadata.create_all(engine)
     return engine, Base
@@ -89,12 +113,70 @@ def _get_or_create_vessel(session, name: str) -> Vessel:
     return v
 
 def _get_berth(session, code: str) -> Berth:
-    b = session.query(Berth).filter(Berth.code==code).one_or_none()
-    if b is None:
-        b = Berth(code=code, meter_start=0, meter_end=400)
-        session.add(b)
-        session.commit()
+    normalized = _normalize_berth_code(code)
+    raw_code = str(code).strip() if code is not None else ""
+
+    candidates = []
+    if normalized:
+        candidates.append(normalized)
+    if raw_code and raw_code not in candidates:
+        candidates.append(raw_code)
+
+    for candidate in candidates:
+        b = session.query(Berth).filter(Berth.code == candidate).one_or_none()
+        if b is not None:
+            return b
+
+    create_code = normalized or raw_code or ""
+    b = Berth(code=create_code, meter_start=0, meter_end=400)
+    session.add(b)
+    session.commit()
     return b
+
+
+def get_vessel_loa_map(session, vessel_names: Iterable[str]) -> Dict[str, float]:
+    """요청된 선박명에 대한 LOA 정보를 반환한다."""
+
+    names = {str(name).strip() for name in vessel_names if str(name).strip()}
+    if not names:
+        return {}
+
+    rows = (
+        session.query(Vessel.name, Vessel.loa_m)
+        .filter(Vessel.name.in_(names))
+        .all()
+    )
+    return {name: loa for name, loa in rows if loa is not None}
+
+
+def set_vessels_loa(session, mapping: Dict[str, float]) -> int:
+    """선박 LOA 값을 일괄 업데이트하고 변경 건수를 반환한다."""
+
+    changed = 0
+    for raw_name, raw_loa in mapping.items():
+        if raw_loa is None:
+            continue
+        try:
+            loa_val = float(raw_loa)
+        except (TypeError, ValueError):
+            continue
+
+        name = str(raw_name).strip()
+        if not name:
+            continue
+
+        vessel = session.query(Vessel).filter(Vessel.name == name).one_or_none()
+        if vessel is None:
+            vessel = Vessel(name=name, loa_m=loa_val)
+            session.add(vessel)
+            changed += 1
+        elif vessel.loa_m != loa_val:
+            vessel.loa_m = loa_val
+            changed += 1
+
+    if changed:
+        session.commit()
+    return changed
 
 def create_version_with_assignments(session, df: pd.DataFrame, source="user-edit", label=""):
     vid = str(uuid.uuid4())
@@ -109,7 +191,7 @@ def create_version_with_assignments(session, df: pd.DataFrame, source="user-edit
             vessel.loa_m = float(r["loa_m"])
             session.add(vessel)
 
-        berth = _get_berth(session, str(r["berth"]))
+        berth = _get_berth(session, r["berth"])
         a = Assignment(
             id=str(uuid.uuid4()),
             version_id=vid,
@@ -149,3 +231,30 @@ def load_assignments_df(session, version_id: str) -> pd.DataFrame:
             "start_meter": a.start_meter,
         })
     return pd.DataFrame(rows)
+
+
+def delete_versions(session, version_ids: Iterable[str] | None = None) -> int:
+    """지정된 버전을 삭제하고 삭제된 개수를 반환한다."""
+
+    query = session.query(ScheduleVersion)
+    if version_ids is not None:
+        ids = {vid for vid in version_ids if vid}
+        if not ids:
+            return 0
+        query = query.filter(ScheduleVersion.id.in_(ids))
+
+    versions = query.all()
+    if not versions:
+        return 0
+
+    count = len(versions)
+    for version in versions:
+        session.delete(version)
+    session.commit()
+    return count
+
+
+def delete_all_versions(session) -> int:
+    """모든 선석 배정 버전을 삭제한다."""
+
+    return delete_versions(session, None)
