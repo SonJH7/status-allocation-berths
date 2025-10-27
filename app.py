@@ -78,7 +78,8 @@ AXIS_BACKGROUND_COLOR = "#e5f3ff"
 
 BP_BASELINE_M = 1500.0
 BERTH_VERTICAL_SPAN_PX = 300.0
-BP_AXIS_STEP = 100.0
+QUARANTINE_MARKER_KEYS = ("quarantine_flag", "quarantine", "검역")
+PILOT_MARKER_KEYS = ("pilot_flag", "pilotage_flag", "pilotage", "pilot", "pilot_text", "도선")
 
 # ------------------------------------------------------------
 # 유틸리티 함수
@@ -198,14 +199,18 @@ def fetch_bptc_dataframe() -> pd.DataFrame:
         if not merge_keys:
             merge_keys = ["vessel"]
         vslmsg_compact = vslmsg_df.drop_duplicates(subset=merge_keys)
-        extra_cols = [col for col in ["bp_raw", "f_pos", "e_pos", "length_m", "start_meter", "end_meter"] if col in vslmsg_compact.columns]
+        extra_cols = [
+            col
+            for col in ["bitt", "bp_raw", "f_pos", "e_pos", "length_m", "start_meter", "end_meter"]
+            if col in vslmsg_compact.columns
+        ]
         df = df.merge(vslmsg_compact[merge_keys + extra_cols], on=merge_keys, how="left")
 
         missing_mask = df.get("length_m").isna() if "length_m" in df.columns else pd.Series(False, index=df.index)
         if missing_mask.any():
             fallback = vslmsg_df.dropna(subset=["length_m"]).drop_duplicates(subset=["vessel"])
             fallback = fallback.set_index("vessel")
-            for col in ["bp_raw", "f_pos", "e_pos", "length_m", "start_meter", "end_meter"]:
+            for col in ["bitt", "bp_raw", "f_pos", "e_pos", "length_m", "start_meter", "end_meter"]:
                 if col not in df.columns:
                     df[col] = None
                 if col in fallback.columns:
@@ -357,6 +362,29 @@ def ensure_timeline_css() -> None:
             color: #1f2937;
             font-weight: 700;
         }}
+        .berth-label {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            align-items: flex-start;
+        }
+        .berth-label .berth-name {
+            font-weight: 700;
+            font-size: 15px;
+            color: #0f2d4c;
+        }
+        .berth-label .bp-axis {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            font-size: 11px;
+            color: #4b5563;
+            line-height: 1.1;
+        }
+        .berth-label .bp-axis span:first-child {
+            color: #1f2937;
+            font-weight: 700;
+        }
         .vis-timeline .vis-item.berth-item {{
             border-radius: 12px;
             border: 2px solid rgba(15, 45, 76, 0.2);
@@ -456,7 +484,42 @@ def format_time_digits(value: object) -> str:
     ts = pd.to_datetime(value, errors="coerce")
     if pd.isna(ts):
         return ""
-    return f"{ts.strftime('%m%d')} {ts.strftime('%H%M')}"
+    return ts.strftime("%H")
+
+
+def extract_marker_label(row: pd.Series, keys: Iterable[str]) -> str:
+    for key in keys:
+        if key not in row.index:
+            continue
+        value = row.get(key)
+        if value is None:
+            continue
+        if isinstance(value, float) and pd.isna(value):
+            continue
+        text = str(value).strip()
+        if text and text.lower() != "nan":
+            return text
+    return ""
+
+
+def extract_meter_range(row: pd.Series) -> Tuple[Optional[float], Optional[float]]:
+    start = row.get("start_meter")
+    end = row.get("end_meter")
+
+    if start is None or pd.isna(start):
+        start = row.get("f_pos")
+    if end is None or pd.isna(end):
+        end = row.get("e_pos")
+
+    def _to_float(value) -> Optional[float]:
+        if value is None or pd.isna(value):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    return _to_float(start), _to_float(end)
 
 
 def extract_meter_range(row: pd.Series) -> Tuple[Optional[float], Optional[float]]:
@@ -517,19 +580,9 @@ def compute_item_offset(row: pd.Series, item_height: float) -> float:
 
 
 def build_group_label(berth: int | str) -> str:
-    ticks: List[str] = []
-    current = BP_BASELINE_M
-    minimum = BP_BASELINE_M - BERTH_VERTICAL_SPAN_PX
-    while current >= minimum:
-        ticks.append(str(int(round(current))))
-        current -= BP_AXIS_STEP
-    if not ticks or ticks[-1] != str(int(round(minimum))):
-        ticks.append(str(int(round(minimum))))
-    axis_html = "".join(f"<span>{tick}</span>" for tick in ticks)
     return (
         "<div class='berth-label'>"
         f"<div class='berth-name'>{html.escape(str(berth))}</div>"
-        f"<div class='bp-axis'>{axis_html}</div>"
         "</div>"
     )
 
@@ -609,6 +662,9 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
     start_text = format_time_digits(row.get("eta"))
     end_text = format_time_digits(row.get("etd"))
 
+    quarantine_text = extract_marker_label(row, QUARANTINE_MARKER_KEYS)
+    pilot_text = extract_marker_label(row, PILOT_MARKER_KEYS)
+
     length_val = row.get("loa_m") if not pd.isna(row.get("loa_m")) else row.get("length_m")
     length_text = ""
     if length_val is not None and not pd.isna(length_val):
@@ -618,7 +674,7 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
         except (TypeError, ValueError):
             length_text = str(length_val)
 
-    bp_text = str(row.get("bp_raw") or "").strip()
+    bp_text = str(row.get("bitt") or row.get("bp_raw") or "").strip()
     if not bp_text:
         f_pos = row.get("f_pos")
         e_pos = row.get("e_pos")
@@ -628,14 +684,27 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
     chip_html = ""
     if length_text:
         chip_body = length_text if not bp_text else f"{length_text} · {bp_text}"
-        chip_html = f"<div class='length-chip'>{chip_body}</div>"
+        chip_html = f"<div class='length-chip'>{html.escape(chip_body)}</div>"
+
+    marker_top_html = (
+        f"<div class='marker-text top'>{html.escape(quarantine_text)}</div>"
+        if quarantine_text
+        else ""
+    )
+    marker_bottom_html = (
+        f"<div class='marker-text bottom'>{html.escape(pilot_text)}</div>"
+        if pilot_text
+        else ""
+    )
+
+    vessel_html = html.escape(vessel)
 
     html = f"""
     <div class='berth-item-card'>
         <div class='time-row'><span>{start_text}</span><span>{end_text}</span></div>
-        <div class='marker-text top'>검역</div>
-        <div class='vessel-name'>{vessel}</div>
-        <div class='marker-text bottom'>도선</div>
+        {marker_top_html}
+        <div class='vessel-name'>{vessel_html}</div>
+        {marker_bottom_html}
         {chip_html}
     </div>
     """
@@ -697,6 +766,8 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             work[col] = pd.to_numeric(work[col], errors="coerce")
     if "bp_raw" in work.columns:
         work["bp_raw"] = work["bp_raw"].astype(str)
+    if "bitt" in work.columns:
+        work["bitt"] = work["bitt"].astype(str)
     if "berth" in work.columns:
         work["berth"] = work["berth"].astype(str)
     return work
@@ -709,6 +780,8 @@ def render_berth_gantt(
     editable: bool = True,
     snap_choice: str = "1h",
     berth_range: Tuple[int, int] = (1, 5),
+    berth_whitelist: Optional[Iterable[str]] = None,
+    group_label_map: Optional[Dict[str, str]] = None,
     height: str = "820px",
     key: str = "gantt",
 ) -> Tuple[pd.DataFrame, Optional[Dict]]:
@@ -723,17 +796,27 @@ def render_berth_gantt(
 
     base_ts = pd.Timestamp(base_date)
     view_start = base_ts.normalize() - pd.Timedelta(days=1)
-    forward_days = max(1, days - 2)
-    view_end = base_ts.normalize() + pd.Timedelta(days=forward_days)
+    view_end = view_start + pd.Timedelta(days=days) - pd.Timedelta(milliseconds=1)
+
+    if "berth" not in prepared.columns:
+        st.warning("선석 정보가 없어 간트 차트를 표시할 수 없습니다.")
+        return prepared, None
+
+    prepared["berth"] = prepared["berth"].astype(str)
 
     berth_min, berth_max = berth_range
-    allowed_berths = {str(b) for b in range(berth_min, berth_max + 1)}
+    if berth_whitelist is not None:
+        berth_order = [str(b) for b in berth_whitelist]
+    else:
+        berth_order = [str(b) for b in range(berth_min, berth_max + 1)]
+
+    allowed_berths = set(berth_order)
 
     mask = (
         prepared["etd"].notna()
         & prepared["eta"].notna()
-        & (prepared["etd"] > view_start)
-        & (prepared["eta"] < view_end)
+        & (prepared["etd"] >= view_start)
+        & (prepared["etd"] <= view_end)
         & prepared["berth"].isin(allowed_berths)
     )
     view_df = prepared.loc[mask].copy()
@@ -780,10 +863,24 @@ def render_berth_gantt(
             icon="⚠️",
         )
 
-    groups = [
-        {"id": str(berth), "content": build_group_label(berth)}
-        for berth in range(berth_min, berth_max + 1)
-    ]
+    groups = []
+    for berth in berth_order:
+        label_value = (
+            group_label_map.get(str(berth))
+            if group_label_map is not None
+            else None
+        )
+        display_label = label_value if label_value else berth
+        groups.append(
+            {
+                "id": str(berth),
+                "content": build_group_label(display_label),
+                "style": (
+                    f"height: {BERTH_VERTICAL_SPAN_PX}px; "
+                    f"line-height: {BERTH_VERTICAL_SPAN_PX}px;"
+                ),
+            }
+        )
 
     items = []
     id_to_index: Dict[str, object] = {}
@@ -848,7 +945,71 @@ def render_berth_gantt(
         "timeAxis": {"scale": "day", "step": 1},
         "locale": "ko",
         "groupHeightMode": "fixed",
-        "groupHeight": BERTH_VERTICAL_SPAN_PX,
+        "locales": {
+            "ko": {
+                "current": "ko",
+                "months": [
+                    "1월",
+                    "2월",
+                    "3월",
+                    "4월",
+                    "5월",
+                    "6월",
+                    "7월",
+                    "8월",
+                    "9월",
+                    "10월",
+                    "11월",
+                    "12월",
+                ],
+                "monthsShort": [
+                    "1월",
+                    "2월",
+                    "3월",
+                    "4월",
+                    "5월",
+                    "6월",
+                    "7월",
+                    "8월",
+                    "9월",
+                    "10월",
+                    "11월",
+                    "12월",
+                ],
+                "weekdays": [
+                    "일요일",
+                    "월요일",
+                    "화요일",
+                    "수요일",
+                    "목요일",
+                    "금요일",
+                    "토요일",
+                ],
+                "weekdaysShort": [
+                    "일",
+                    "월",
+                    "화",
+                    "수",
+                    "목",
+                    "금",
+                    "토",
+                ],
+                "weekdaysMin": [
+                    "일",
+                    "월",
+                    "화",
+                    "수",
+                    "목",
+                    "금",
+                    "토",
+                ],
+                "format": {
+                    "date": "YYYY-MM-DD",
+                    "time": "HH:mm",
+                    "datetime": "YYYY-MM-DD HH:mm",
+                },
+            }
+        },
     }
 
     event_result = st_timeline(items, groups, options, height=height, key=key)
@@ -1185,13 +1346,25 @@ else:
             )
 
     with tabs[1]:
+        df_for_gantt = filtered_df.copy()
+        berth_label_pairs: List[Tuple[str, str]] = [
+            ("9", "9(1)"),
+            ("8", "8(2)"),
+            ("7", "7(3)"),
+            ("6", "6(4)"),
+        ]
+        berth_order = [pair[0] for pair in berth_label_pairs]
+        berth_label_map = dict(berth_label_pairs)
+
         updated_df, event_payload = render_berth_gantt(
-            filtered_df,
+            df_for_gantt,
             base_date=base_date,
             days=timeline_days,
             editable=True,
             snap_choice=snap_choice,
             berth_range=(6, 9),
+            berth_whitelist=berth_order,
+            group_label_map=berth_label_map,
             height="820px",
             key="gamman",
         )
@@ -1218,7 +1391,29 @@ else:
                 render_modal(modal_row)
 
     with st.expander("현재 테이블 보기", expanded=False):
-        st.dataframe(working_df_after, use_container_width=True)
+        table_df = working_df_after.copy()
+        if not table_df.empty:
+            if "bitt" in table_df.columns and "bp" not in table_df.columns:
+                table_df.insert(
+                    min(3, len(table_df.columns)),
+                    "bp",
+                    table_df["bitt"],
+                )
+            if "f_pos" in table_df.columns and "F" not in table_df.columns:
+                insert_at = (
+                    table_df.columns.get_loc("bp") + 1
+                    if "bp" in table_df.columns
+                    else min(4, len(table_df.columns))
+                )
+                table_df.insert(insert_at, "F", table_df["f_pos"])
+            if "e_pos" in table_df.columns and "E" not in table_df.columns:
+                insert_at = (
+                    table_df.columns.get_loc("F") + 1
+                    if "F" in table_df.columns
+                    else min(5, len(table_df.columns))
+                )
+                table_df.insert(insert_at, "E", table_df["e_pos"])
+        st.dataframe(table_df, use_container_width=True)
 
     diff_df = compute_diff(st.session_state.get("raw_df"), working_df_after)
     if not diff_df.empty:
