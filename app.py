@@ -729,8 +729,7 @@ def render_berth_gantt(
 
     base_ts = pd.Timestamp(base_date)
     view_start = base_ts.normalize() - pd.Timedelta(days=1)
-    forward_days = max(1, days - 2)
-    view_end = base_ts.normalize() + pd.Timedelta(days=forward_days)
+    view_end = view_start + pd.Timedelta(days=days) - pd.Timedelta(milliseconds=1)
 
     berth_min, berth_max = berth_range
     allowed_berths = {str(b) for b in range(berth_min, berth_max + 1)}
@@ -738,8 +737,8 @@ def render_berth_gantt(
     mask = (
         prepared["etd"].notna()
         & prepared["eta"].notna()
-        & (prepared["etd"] > view_start)
-        & (prepared["eta"] < view_end)
+        & (prepared["etd"] >= view_start)
+        & (prepared["etd"] <= view_end)
         & prepared["berth"].isin(allowed_berths)
     )
     view_df = prepared.loc[mask].copy()
@@ -787,7 +786,14 @@ def render_berth_gantt(
         )
 
     groups = [
-        {"id": str(berth), "content": build_group_label(berth)}
+        {
+            "id": str(berth),
+            "content": build_group_label(berth),
+            "style": (
+                f"height: {BERTH_VERTICAL_SPAN_PX}px; "
+                f"line-height: {BERTH_VERTICAL_SPAN_PX}px;"
+            ),
+        }
         for berth in range(berth_min, berth_max + 1)
     ]
 
@@ -854,7 +860,71 @@ def render_berth_gantt(
         "timeAxis": {"scale": "day", "step": 1},
         "locale": "ko",
         "groupHeightMode": "fixed",
-        "groupHeight": BERTH_VERTICAL_SPAN_PX,
+        "locales": {
+            "ko": {
+                "current": "ko",
+                "months": [
+                    "1월",
+                    "2월",
+                    "3월",
+                    "4월",
+                    "5월",
+                    "6월",
+                    "7월",
+                    "8월",
+                    "9월",
+                    "10월",
+                    "11월",
+                    "12월",
+                ],
+                "monthsShort": [
+                    "1월",
+                    "2월",
+                    "3월",
+                    "4월",
+                    "5월",
+                    "6월",
+                    "7월",
+                    "8월",
+                    "9월",
+                    "10월",
+                    "11월",
+                    "12월",
+                ],
+                "weekdays": [
+                    "일요일",
+                    "월요일",
+                    "화요일",
+                    "수요일",
+                    "목요일",
+                    "금요일",
+                    "토요일",
+                ],
+                "weekdaysShort": [
+                    "일",
+                    "월",
+                    "화",
+                    "수",
+                    "목",
+                    "금",
+                    "토",
+                ],
+                "weekdaysMin": [
+                    "일",
+                    "월",
+                    "화",
+                    "수",
+                    "목",
+                    "금",
+                    "토",
+                ],
+                "format": {
+                    "date": "YYYY-MM-DD",
+                    "time": "HH:mm",
+                    "datetime": "YYYY-MM-DD HH:mm",
+                },
+            }
+        },
     }
 
     event_result = st_timeline(items, groups, options, height=height, key=key)
