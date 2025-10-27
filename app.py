@@ -13,13 +13,14 @@ from bs4 import BeautifulSoup
 from streamlit_timeline import st_timeline
 
 import numpy as np
+from db import SessionLocal, get_vessel_loa_map
 
 # ------------------------------------------------------------
 # 상수 정의
 # ------------------------------------------------------------
 BPTC_ENDPOINT = "https://info.bptc.co.kr/Berth_status_text_servlet_sw_kr"
 BPTC_FORM_PAYLOAD = {
-    "v_time": "3days",
+    "v_time": "7days",
     "ROCD": "ALL",
     "ORDER": "item3",
     "v_gu": "A",
@@ -72,6 +73,7 @@ DEFAULT_COLOR_SEQUENCE = [
 ]
 
 AXIS_BACKGROUND_COLOR = "#e5f3ff"
+DEFAULT_BERTH_LENGTH_M = 300.0
 
 # ------------------------------------------------------------
 # 유틸리티 함수
@@ -286,7 +288,6 @@ def ensure_timeline_css() -> None:
             border: 1px solid rgba(0,0,0,0.25);
             font-size: 12px;
             color: #1e1e1e;
-            height: 46px;
         }}
         .berth-item-content {{
             position: relative;
@@ -406,6 +407,67 @@ def format_qty_value(value: object) -> str:
     return text if text else "0"
 
 
+def normalize_berth_code(value: object) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+
+    text = str(value).strip()
+    if not text:
+        return ""
+
+    if "(" in text:
+        prefix = text.split("(", 1)[0]
+        digits = "".join(ch for ch in prefix if ch.isdigit())
+        if digits:
+            return str(int(digits))
+
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if digits:
+        return str(int(digits))
+
+    return text
+
+
+def attach_vessel_loa(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty or "vessel" not in df.columns:
+        return df
+
+    needs_lookup = "loa_m" not in df.columns or df["loa_m"].isna().all()
+    if not needs_lookup:
+        return df
+
+    session = SessionLocal()
+    try:
+        mapping = get_vessel_loa_map(session, df["vessel"].dropna().tolist())
+    finally:
+        session.close()
+
+    if not mapping:
+        return df
+
+    enriched = df.copy()
+    if "loa_m" not in enriched.columns:
+        enriched["loa_m"] = np.nan
+
+    mapped = enriched["vessel"].map(mapping)
+    enriched.loc[mapped.notna(), "loa_m"] = mapped[mapped.notna()]
+    return enriched
+
+
+def compute_item_height(row: pd.Series) -> float:
+    loa_val = row.get("loa_m")
+    try:
+        loa_float = float(loa_val)
+    except (TypeError, ValueError):
+        loa_float = None
+
+    if loa_float is None or np.isnan(loa_float):
+        return 54.0
+
+    scaled = 32.0 + (loa_float / DEFAULT_BERTH_LENGTH_M) * 96.0
+    return max(32.0, min(120.0, scaled))
+
+
 def build_item_html(row: pd.Series) -> Tuple[str, str]:
     start_tag = row.get("start_tag")
     end_tag = row.get("end_tag")
@@ -481,6 +543,7 @@ def build_item_html(row: pd.Series) -> Tuple[str, str]:
         if editable
         else False,
         "groupEditable": False,
+        "groupHeightMode": "fitItems",
         "min": view_start.isoformat(),
         "max": view_end.isoformat(),
         "orientation": {"axis": "top"},
@@ -503,7 +566,8 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         if col in work.columns:
             work[col] = to_datetime(work[col])
     if "berth" in work.columns:
-        work["berth"] = work["berth"].astype(str)
+        work["berth"] = work["berth"].apply(normalize_berth_code)
+    work = attach_vessel_loa(work)
     return work
 
 
@@ -514,7 +578,7 @@ def render_berth_gantt(
     editable: bool = True,
     snap_choice: str = "1h",
     berth_range: Tuple[int, int] = (1, 5),
-    height: str = "820px",
+    height: Optional[str] = None,
     key: str = "gantt",
 ) -> Tuple[pd.DataFrame, Optional[Dict]]:
     """df의 모든 컬럼을 보존하여 vis.js items/groups로 변환 후 렌더링."""
@@ -527,8 +591,8 @@ def render_berth_gantt(
         return prepared, None
 
     base_ts = pd.Timestamp(base_date)
-    view_start = base_ts.normalize() - pd.Timedelta(days=1)
-    view_end = base_ts.normalize() + pd.Timedelta(days=days)
+    view_start = base_ts.normalize()
+    view_end = view_start + pd.Timedelta(days=days)
 
     berth_min, berth_max = berth_range
     allowed_berths = {str(b) for b in range(berth_min, berth_max + 1)}
@@ -536,7 +600,7 @@ def render_berth_gantt(
     mask = (
         prepared["etd"].notna()
         & prepared["eta"].notna()
-        & (prepared["etd"] > view_start)
+        & (prepared["etd"] >= view_start)
         & (prepared["eta"] < view_end)
         & prepared["berth"].isin(allowed_berths)
     )
@@ -562,6 +626,13 @@ def render_berth_gantt(
         content_html, tooltip = build_item_html(row)
         item_id = str(idx)
         id_to_index[item_id] = idx
+        item_height = compute_item_height(row)
+        color = resolve_background_color(row)
+        style = (
+            f"background-color: {color};"
+            f"height: {item_height:.1f}px;"
+            f"min-height: {item_height:.1f}px;"
+        )
 
         items.append(
             {
@@ -571,7 +642,7 @@ def render_berth_gantt(
                 "end": end,
                 "content": content_html,
                 "title": tooltip,
-                "style": f"background-color: {resolve_background_color(row)};",
+                "style": style,
                 "className": "berth-item",
                 "type": "range",
                 "data": row_to_jsonable(row),
@@ -603,7 +674,13 @@ def render_berth_gantt(
         "locale": "ko",
     }
 
-    event_result = st_timeline(items, groups, options, height=height, key=key)
+    if height:
+        effective_height = height
+    else:
+        row_count = max(len(groups), 1)
+        effective_height = f"{max(360, int(row_count * 110))}px"
+
+    event_result = st_timeline(items, groups, options, height=effective_height, key=key)
 
     updated = prepared.copy()
     event_payload: Optional[Dict] = None
@@ -649,12 +726,15 @@ def apply_filters(
         return pd.DataFrame()
     work = df.copy()
 
-    if date_start is not None and "etd" in work.columns:
-        start_ts = pd.Timestamp(date_start)
-        work = work[(work["etd"].isna()) | (work["etd"] >= start_ts)]
-    if date_end is not None and "eta" in work.columns:
-        end_ts = pd.Timestamp(date_end)
-        work = work[(work["eta"].isna()) | (work["eta"] <= end_ts + pd.Timedelta(days=1))]
+    if "eta" in work.columns and "etd" in work.columns:
+        mask = pd.Series(True, index=work.index)
+        if date_start is not None:
+            start_ts = pd.Timestamp(date_start)
+            mask &= work["etd"].isna() | (work["etd"] >= start_ts)
+        if date_end is not None:
+            end_ts = pd.Timestamp(date_end) + pd.Timedelta(days=1)
+            mask &= work["eta"].isna() | (work["eta"] < end_ts)
+        work = work.loc[mask]
 
     if operator_filter:
         keyword = operator_filter.strip().upper()
@@ -900,7 +980,19 @@ filtered_df = apply_filters(
 if filtered_df.empty:
     st.warning("필터 조건에 해당하는 데이터가 없습니다.")
 else:
-    base_date = datetime.combine(date_start, datetime.min.time()) if date_start else datetime.today()
+    if date_start and date_end and date_end >= date_start:
+        base_date = datetime.combine(date_start, datetime.min.time())
+        view_days = (date_end - date_start).days + 1
+    elif date_start:
+        base_date = datetime.combine(date_start, datetime.min.time())
+        view_days = 7
+    elif date_end:
+        base_date = datetime.combine(date_end, datetime.min.time())
+        view_days = 7
+    else:
+        base_date = datetime.today()
+        view_days = 7
+    view_days = max(view_days, 1)
 
     tabs = st.tabs(["신선대(1~5선석)", "감만(6~9선석)"])
 
@@ -910,11 +1002,11 @@ else:
         updated_df, event_payload = render_berth_gantt(
             filtered_df,
             base_date=base_date,
-            days=7,
+            days=view_days,
             editable=True,
             snap_choice=snap_choice,
             berth_range=(1, 5),
-            height="820px",
+            height=None,
             key="sinsundae",
         )
         if event_payload:
@@ -935,11 +1027,11 @@ else:
         updated_df, event_payload = render_berth_gantt(
             filtered_df,
             base_date=base_date,
-            days=7,
+            days=view_days,
             editable=True,
             snap_choice=snap_choice,
             berth_range=(6, 9),
-            height="820px",
+            height=None,
             key="gamman",
         )
         if event_payload:
