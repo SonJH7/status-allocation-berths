@@ -461,15 +461,20 @@ def ensure_timeline_css() -> None:
         }}
         .vis-timeline .vis-item.berth-item {{
             border-radius: 12px;
-            border: 2px solid rgba(15, 45, 76, 0.2);
             overflow: visible;
+            background-color: transparent !important;
+            border: 10px solid rgba(255, 0, 0, 0.5) !important; /* DEBUG: RED */
+            box-sizing: border-box;
         }}
         .vis-timeline .vis-item.berth-item.bp-aligned {{
             transition: transform 0.25s ease, margin-top 0.25s ease;
         }}
         .vis-timeline .vis-item.berth-item .vis-item-content {{
-            padding: 0 !important;
+            padding: 10px !important;
             height: 100%;
+            background-color: rgba(0, 255, 0, 0.2) !important; /* DEBUG: GREEN */
+            box-sizing: border-box;
+            background-clip: content-box;
         }}
         .vis-timeline .vis-item.berth-item.gap-warning {{
             border-color: #d97706;
@@ -481,23 +486,26 @@ def ensure_timeline_css() -> None:
             height: 100%;
             display: flex;
             flex-direction: column;
-            justify-content: center;
+            justify-content: flex-start; /* Align content to the top */
             align-items: center;
-            padding: 18px 12px 14px 12px;
+            padding: 6px 12px; /* Adjusted padding */
             box-sizing: border-box;
-            gap: 6px;
+            gap: 4px;
+            background-color: rgba(0, 0, 255, 0.2) !important; /* DEBUG: BLUE */
+            background-clip: content-box;
         }}
         .berth-item-card .time-row {{
-            position: absolute;
-            top: 6px;
+            position: relative; /* Changed from absolute */
+            top: 0;
             left: 0;
             right: 0;
             display: flex;
             justify-content: space-between;
-            padding: 0 10px;
+            padding: 0;
             font-size: 12px;
             font-weight: 700;
             color: #0f2d4c;
+            width: 100%;
         }}
         .berth-item-card .time-row .time {{
             min-width: 20px;
@@ -507,7 +515,7 @@ def ensure_timeline_css() -> None:
             display: flex;
             flex-direction: column;
             align-items: center;
-            justify-content: center;
+            justify-content: flex-start; /* Align content to the top */
             gap: 4px;
             width: 100%;
         }}
@@ -1015,9 +1023,13 @@ def render_berth_gantt(
         id_to_index[item_id] = idx
 
         height_px = compute_item_height(row)
+        group_span = BERTH_VERTICAL_SPAN_PX
         offset_px = compute_item_offset(row, height_px)
         base_class = "berth-item gap-warning" if bool(gap_flags_map.get(idx, False)) else "berth-item"
         item_class = f"{base_class} bp-aligned"
+# 아이템이 그룹을 넘치지 않도록 클램프 (권장)
+        translate = f"translateY(calc(-50% - {group_span/4}px + {offset_px}px))"
+
         group_value = row.get("berth_normalized") or row.get("berth")
         items.append(
             {
@@ -1028,9 +1040,8 @@ def render_berth_gantt(
                 "content": content_html,
                 "title": tooltip,
                 "style": (
-                    f"background-color: {resolve_background_color(row)};"
                     f" height: {height_px}px;"
-                    f" margin-top: {offset_px}px;"
+                    f" transform: {translate};"
                 ),
                 "className": item_class,
                 "type": "range",
@@ -1054,7 +1065,7 @@ def render_berth_gantt(
         "start": view_start.isoformat(),
         "end": view_end.isoformat(),
         "orientation": {"axis": "top"},
-        "margin": {"item": 8, "axis": 12},
+        "margin": {"item": {"vertical": 0, "horizontal": 8}, "axis": 12},
         "multiselect": False,
         "moveable": True,
         "zoomable": True,

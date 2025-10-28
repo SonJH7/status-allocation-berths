@@ -21,11 +21,11 @@ BERTH_VERTICAL_SPAN_PX = 300.0
 # 실제 B.P. 좌표계를 기준으로 한 선석별 미터 범위.
 # B.P. 1500m에서 0m 방향으로 내려오면서 300m 폭으로 선석이 배치된다.
 BERTH_METER_RANGES: Dict[str, Tuple[float, float]] = {
-    "1": (1200.0, 1500.0),
-    "2": (900.0, 1200.0),
+    "1": (0.0, 300.0),
+    "2": (300.0, 600.0),
     "3": (600.0, 900.0),
-    "4": (300.0, 600.0),
-    "5": (0.0, 300.0),
+    "4": (900.0, 1200.0),
+    "5": (1200.0, 1500.0),
 }
 
 
@@ -111,18 +111,17 @@ def resolve_berth_span(row: pd.Series) -> Optional[float]:
 
 
 def compute_item_height(row: pd.Series) -> float:
-    berth_span = resolve_berth_span(row)
-    max_height = berth_span if berth_span is not None else BERTH_VERTICAL_SPAN_PX
+    """아이템 높이(px)를 F/E 미터 범위에 따라 계산."""
     start_meter, end_meter = extract_meter_range(row)
     if start_meter is not None and end_meter is not None:
         lower = float(min(start_meter, end_meter))
         upper = float(max(start_meter, end_meter))
         span = upper - lower
         if span > 0:
-            if berth_span is not None:
-                span = min(span, berth_span)
-            return float(max(24.0, min(max_height, span)))
+            # F/E 범위에 따라 높이를 설정하되 최소 높이를 24px로 보장
+            return float(max(24.0, span))
 
+    # F/E 정보가 없으면 LOA(선박 길이)를 사용
     length_val = row.get("loa_m")
     if length_val is None or pd.isna(length_val):
         length_val = row.get("length_m")
@@ -131,14 +130,18 @@ def compute_item_height(row: pd.Series) -> float:
     except (TypeError, ValueError):
         numeric = None
 
+    # LOA도 없으면 기본 높이 86.0 사용
     if numeric is None or pd.isna(numeric):
         return 86.0
-    scaled = numeric
-    return float(max(24.0, min(max_height, scaled)))
+    
+    # LOA를 높이로 사용하되 최소 높이 보장
+    return float(max(24.0, numeric))
 
 
 def compute_item_offset(row: pd.Series, item_height: float) -> float:
-    """선석 내에서 아이템 상단 여백(px)을 계산."""
+    """선석 내에서 아이템 상단 여백(px)을 계산.
+    표준 좌표계(0m이 위쪽)를 기준으로, 아이템의 위치를 소속된 선석 그룹에 상대적으로 계산한다.
+    """
 
     def _to_float(value) -> Optional[float]:
         if value is None or pd.isna(value):
@@ -148,62 +151,22 @@ def compute_item_offset(row: pd.Series, item_height: float) -> float:
         except (TypeError, ValueError):
             return None
 
-    start_meter, end_meter = extract_meter_range(row)
+    # 표준 좌표계이므로 아이템 상단 기준점은 F/E 값 중 더 작은 값.
+    start_meter, _ = extract_meter_range(row)
+    top_anchor = _to_float(start_meter)
+
     berth_range = get_berth_meter_range(row.get("berth"))
 
-    if (
-        berth_range is not None
-        and berth_range[0] is not None
-        and berth_range[1] is not None
-        and berth_range[1] > berth_range[0]
-    ):
-        berth_start = float(berth_range[0])
-        berth_end = float(berth_range[1])
-        berth_span = berth_end - berth_start
+    if top_anchor is None or berth_range is None or berth_range[0] is None:
+        # 위치 정보가 없으면 그룹 중앙에 배치
+        return (BERTH_VERTICAL_SPAN_PX - item_height) / 2.0
 
-        top_anchor = _to_float(start_meter)
-        bottom_anchor = _to_float(end_meter)
-        if top_anchor is None and bottom_anchor is not None:
-            top_anchor = bottom_anchor
-        if top_anchor is None:
-            anchor_candidates: List[float] = []
-            for key in ("f_pos", "e_pos"):
-                converted = _to_float(row.get(key))
-                if converted is not None:
-                    anchor_candidates.append(converted)
-            if anchor_candidates:
-                top_anchor = min(anchor_candidates)
+    berth_start = float(berth_range[0])
 
-        if top_anchor is None:
-            return 0.0
-
-        clamped_top = min(max(float(top_anchor), berth_start), berth_end)
-        offset = clamped_top - berth_start
-        max_offset = max(0.0, berth_span - item_height)
-        if max_offset < 0:
-            max_offset = 0.0
-        if offset > max_offset:
-            offset = max_offset
-        if offset < 0:
-            offset = 0.0
-        return float(offset)
-
-    anchor_candidates: List[float] = []
-    for candidate in (start_meter, end_meter, row.get("f_pos"), row.get("e_pos")):
-        converted = _to_float(candidate)
-        if converted is not None:
-            anchor_candidates.append(converted)
-
-    if not anchor_candidates:
-        return 0.0
-
-    anchor = max(anchor_candidates)
-    offset = BP_BASELINE_M - anchor
-    if offset < 0:
-        offset = 0.0
-    max_offset = max(0.0, BERTH_VERTICAL_SPAN_PX - item_height)
-    if offset > max_offset:
-        offset = max_offset
+    # 아이템의 절대 시작 위치에서 선석 그룹의 시작 위치를 뺀 값이
+    # 그룹 내에서의 상대적 오프셋이 된다.
+    offset = top_anchor - berth_start
+    
     return float(offset)
 
 
