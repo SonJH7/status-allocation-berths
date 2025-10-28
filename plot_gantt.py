@@ -13,6 +13,15 @@ import pandas as pd
 import streamlit as st
 from streamlit_timeline import st_timeline
 
+from berth_layout import (
+    BERTH_VERTICAL_SPAN_PX,
+    compute_item_height,
+    compute_item_offset,
+    normalize_berth_label,
+    normalize_berth_list,
+    snap_to_interval,
+)
+
 
 # ------------------------------------------------------------
 # 비주얼 스타일 팔레트 & 스냅 도구
@@ -24,177 +33,6 @@ PALETTE: Dict[str, str] = {
     "pink": "#f8d3f1",
     "beige": "#ffe3a3",
 }
-
-BP_BASELINE_M = 1500.0
-BERTH_VERTICAL_SPAN_PX = 300.0
-BERTH_METER_RANGES: Dict[str, Tuple[float, float]] = {
-    "1": (0.0, 300.0),
-    "2": (301.0, 600.0),
-    "3": (601.0, 900.0),
-    "4": (901.0, 1200.0),
-    "5": (1200.0, 1500.0),
-}
-
-
-def get_berth_meter_range(berth_value: object) -> Optional[Tuple[float, float]]:
-    if berth_value is None or pd.isna(berth_value):
-        return None
-    key = str(berth_value).strip()
-    if not key:
-        return None
-    return BERTH_METER_RANGES.get(key)
-
-
-def extract_meter_range(row: pd.Series) -> Tuple[Optional[float], Optional[float]]:
-    def _to_float(value) -> Optional[float]:
-        if value is None or pd.isna(value):
-            return None
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
-    values: List[float] = []
-    for key in ("start_meter", "end_meter", "f_pos", "e_pos"):
-        converted = _to_float(row.get(key))
-        if converted is not None:
-            values.append(converted)
-
-    if not values:
-        return None, None
-
-    lower = min(values)
-    upper = max(values)
-    return lower, upper
-
-
-def resolve_berth_span(row: pd.Series) -> Optional[float]:
-    berth_range = get_berth_meter_range(row.get("berth"))
-    if berth_range is None:
-        return None
-    start, end = berth_range
-    if start is None or end is None:
-        return None
-    span = float(end - start)
-    if span <= 0:
-        return None
-    return span
-
-
-def compute_item_height(row: pd.Series) -> float:
-    berth_span = resolve_berth_span(row)
-    max_height = berth_span if berth_span is not None else BERTH_VERTICAL_SPAN_PX
-    start_meter, end_meter = extract_meter_range(row)
-    if start_meter is not None and end_meter is not None:
-        lower = float(min(start_meter, end_meter))
-        upper = float(max(start_meter, end_meter))
-        span = upper - lower
-        if span > 0:
-            if berth_span is not None:
-                span = min(span, berth_span)
-            return float(max(24.0, min(max_height, span)))
-
-    length_val = row.get("loa_m")
-    if length_val is None or pd.isna(length_val):
-        length_val = row.get("length_m")
-    try:
-        numeric = float(length_val)
-    except (TypeError, ValueError):
-        numeric = None
-
-    if numeric is None or pd.isna(numeric):
-        return 86.0
-    scaled = numeric
-    return float(max(24.0, min(max_height, scaled)))
-
-
-def compute_item_offset(row: pd.Series, item_height: float) -> float:
-    def _to_float(value) -> Optional[float]:
-        if value is None or pd.isna(value):
-            return None
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
-    start_meter, end_meter = extract_meter_range(row)
-    berth_range = get_berth_meter_range(row.get("berth"))
-
-    if (
-        berth_range is not None
-        and berth_range[0] is not None
-        and berth_range[1] is not None
-        and berth_range[1] > berth_range[0]
-    ):
-        berth_start = float(berth_range[0])
-        berth_end = float(berth_range[1])
-        berth_span = berth_end - berth_start
-
-        top_anchor = _to_float(start_meter)
-        bottom_anchor = _to_float(end_meter)
-        if top_anchor is None and bottom_anchor is not None:
-            top_anchor = bottom_anchor
-        if top_anchor is None:
-            anchor_candidates: List[float] = []
-            for key in ("f_pos", "e_pos"):
-                converted = _to_float(row.get(key))
-                if converted is not None:
-                    anchor_candidates.append(converted)
-            if anchor_candidates:
-                top_anchor = min(anchor_candidates)
-
-        if top_anchor is None:
-            return 0.0
-
-        clamped_top = min(max(float(top_anchor), berth_start), berth_end)
-        offset = clamped_top - berth_start
-        max_offset = max(0.0, berth_span - item_height)
-        if max_offset < 0:
-            max_offset = 0.0
-        if offset > max_offset:
-            offset = max_offset
-        if offset < 0:
-            offset = 0.0
-        return float(offset)
-
-    anchor_candidates: List[float] = []
-    for candidate in (start_meter, end_meter, row.get("f_pos"), row.get("e_pos")):
-        converted = _to_float(candidate)
-        if converted is not None:
-            anchor_candidates.append(converted)
-
-    if not anchor_candidates:
-        return 0.0
-
-    anchor = max(anchor_candidates)
-    offset = BP_BASELINE_M - anchor
-    if offset < 0:
-        offset = 0.0
-    max_offset = max(0.0, BERTH_VERTICAL_SPAN_PX - item_height)
-    if offset > max_offset:
-        offset = max_offset
-    return float(offset)
-
-
-def snap_to_interval(ts: pd.Timestamp, snap_choice: str) -> pd.Timestamp:
-    """지정된 스냅 간격(1h/30m/15m)에 맞춰 Timestamp 보정."""
-
-    if pd.isna(ts):
-        return ts
-
-    if not isinstance(ts, pd.Timestamp):
-        ts = pd.to_datetime(ts, errors="coerce")
-
-    if pd.isna(ts):
-        return ts
-
-    minute_map = {"1h": 60, "30m": 30, "15m": 15}
-    minutes = minute_map.get(snap_choice, 60)
-
-    snapped = ts.floor(f"{minutes}min")
-    return snapped
-
-
 def _ensure_timeline_css(unique_key: str) -> None:
     """타임라인 꾸밈 CSS를 중복 없이 주입."""
 
@@ -241,40 +79,6 @@ def _ensure_timeline_css(unique_key: str) -> None:
     )
 
     st.session_state[css_key] = True
-
-
-def normalize_berth_label(value) -> str:
-    """선석 라벨을 숫자 위주로 정규화한다 (예: "9(1)" → "9")."""
-
-    if pd.isna(value):
-        return ""
-
-    text = str(value).strip()
-    if not text:
-        return ""
-
-    # 괄호 앞에 실제 선석 번호가 표기된 경우 우선적으로 사용한다.
-    if "(" in text:
-        prefix = text[: text.find("(")]
-        prefix_digits = "".join(ch for ch in prefix if ch.isdigit())
-        if prefix_digits:
-            return str(int(prefix_digits))
-
-    if "(" in text and ")" in text:
-        start = text.find("(") + 1
-        end = text.find(")", start)
-        if end > start:
-            inside = "".join(ch for ch in text[start:end] if ch.isdigit())
-            if inside:
-                return str(int(inside))
-
-    digits = "".join(ch for ch in text if ch.isdigit())
-    if digits:
-        return str(int(digits))
-
-    return text
-
-
 def _berth_sort_key(value: str) -> Tuple[int, str]:
     if value.isdigit():
         return (0, int(value))
@@ -312,24 +116,6 @@ def _prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     work["berth"] = work["berth"].map(normalize_berth_label)
     work = work.reset_index(drop=True)
     return work
-
-
-def _normalize_berth_list(values: Iterable[str] | None) -> List[str]:
-    normalized: List[str] = []
-    seen = set()
-    if not values:
-        return normalized
-
-    for value in values:
-        norm = normalize_berth_label(value)
-        if not norm or norm in seen:
-            continue
-        seen.add(norm)
-        normalized.append(norm)
-
-    return normalized
-
-
 def _build_groups(
     berths: Iterable[str],
     order: Iterable[str] | None = None,
@@ -338,7 +124,7 @@ def _build_groups(
     label_map = label_map or {}
 
     if order:
-        normalized_order = _normalize_berth_list(order)
+        normalized_order = normalize_berth_list(order)
         return [
             {
                 "id": b,
@@ -883,7 +669,7 @@ def render_berth_gantt(
                 label_map[normalized_key] = display
 
     if allowed_berths is not None:
-        allowed_list = _normalize_berth_list(allowed_berths)
+        allowed_list = normalize_berth_list(allowed_berths)
         allowed_set = set(allowed_list)
         if allowed_set:
             view_df = view_df[
@@ -956,44 +742,6 @@ def render_berth_gantt(
         _render_vessel_modal(modal_row, modal_idx, modal_orientation, modal_loads, modal_discharges, key)
 
     return df_prepared.reset_index(drop=True), event_payload
-
-
-def get_demo_df(base_date: pd.Timestamp | None = None) -> pd.DataFrame:
-    """스크린샷과 유사한 7일치 5선석 데모 데이터를 생성."""
-
-    base = pd.Timestamp(base_date) if base_date is not None else pd.Timestamp.today().normalize()
-    day0 = base.normalize()
-
-    def row(berth, vessel, start_offset_h, duration_h, status, start_tag, end_tag, badge=None, loa=45):
-        start = day0 + pd.Timedelta(hours=start_offset_h)
-        end = start + pd.Timedelta(hours=duration_h)
-        return {
-            "berth": berth,
-            "vessel": vessel,
-            "eta": start,
-            "etd": end,
-            "status": status,
-            "start_tag": start_tag,
-            "end_tag": end_tag,
-            "badge": badge,
-            "loa_m": loa,
-        }
-
-    sample_rows = [
-        row("1", "CKSM-18(S)", -12, 30, "cyan", "15", "11", "도선", 48),
-        row("1", "KOBE STAR", 20, 18, "pink", "24", "06", "검역", 60),
-        row("2", "MOON BAY", -5, 26, "beige", "09", "07", None, 52),
-        row("2", "HANIL SUN", 30, 16, "gray", "05", "08", "도선", 42),
-        row("3", "KARISMA", 10, 20, "cyan", "22", "03", "검역", 55),
-        row("3", "BAEKDU", -18, 24, "pink", "18", "12", None, 70),
-        row("4", "ORIENT GLORY", 5, 30, "beige", "11", "04", "도선", 80),
-        row("4", "BLUE PEARL", 40, 22, "gray", "06", "05", None, 35),
-        row("5", "TITAN", -8, 28, "cyan", "13", "09", "검역", 66),
-        row("5", "SUNRISE", 32, 20, "pink", "07", "10", "도선", 58),
-    ]
-
-    df = pd.DataFrame(sample_rows)
-    return df
 
 
 # 기존 코드와의 호환성을 위해 alias 제공
