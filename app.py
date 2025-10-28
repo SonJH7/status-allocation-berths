@@ -14,6 +14,17 @@ from streamlit_timeline import st_timeline
 from bptc_vslmsg import fetch_bptc_g_vslmsg
 from crawling.main import collect_berth_info
 
+from berth_layout import (
+    BERTH_VERTICAL_SPAN_PX,
+    compute_item_height,
+    compute_item_offset,
+    extract_meter_range,
+    get_berth_meter_range,
+    normalize_berth_label,
+    normalize_berth_list,
+    snap_to_interval,
+)
+
 import numpy as np
 
 # ------------------------------------------------------------
@@ -95,16 +106,6 @@ REFERENCE_STATUS_COLOR_MAP = {
 REFERENCE_COLUMN_CANDIDATES = ("참고", "reference", "remarks", "remark")
 
 AXIS_BACKGROUND_COLOR = "#e5f3ff"
-
-BP_BASELINE_M = 1500.0
-BERTH_VERTICAL_SPAN_PX = 300.0
-BERTH_METER_RANGES: Dict[str, Tuple[float, float]] = {
-    "1": (0.0, 300.0),
-    "2": (301.0, 600.0),
-    "3": (601.0, 900.0),
-    "4": (901.0, 1200.0),
-    "5": (1200.0, 1500.0),
-}
 QUARANTINE_MARKER_KEYS = ("quarantine_flag", "quarantine", "검역")
 PILOT_MARKER_KEYS = ("pilot_flag", "pilotage_flag", "pilotage", "pilot", "pilot_text", "도선")
 
@@ -380,14 +381,6 @@ def get_demo_df(base_date: Optional[pd.Timestamp] = None) -> pd.DataFrame:
 
     demo_df = pd.DataFrame(rows)
     return demo_df
-
-
-def snap_to_interval(ts: pd.Timestamp, key: str) -> pd.Timestamp:
-    minutes = {"1h": 60, "30m": 30, "15m": 15}[key]
-    ts = ts.to_pydatetime().replace(second=0, microsecond=0)
-    return pd.Timestamp(ts) - pd.Timedelta(minutes=ts.minute % minutes)
-
-
 def ensure_timeline_css() -> None:
     if st.session_state.get("_timeline_css_injected"):
         return
@@ -626,148 +619,6 @@ def extract_marker_label(row: pd.Series, keys: Iterable[str]) -> str:
         if text and text.lower() != "nan":
             return text
     return ""
-
-
-def extract_meter_range(row: pd.Series) -> Tuple[Optional[float], Optional[float]]:
-    def _to_float(value) -> Optional[float]:
-        if value is None or pd.isna(value):
-            return None
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
-    values: List[float] = []
-    for key in ("start_meter", "end_meter", "f_pos", "e_pos"):
-        converted = _to_float(row.get(key))
-        if converted is not None:
-            values.append(converted)
-
-    if not values:
-        return None, None
-
-    lower = min(values)
-    upper = max(values)
-    return lower, upper
-
-
-def get_berth_meter_range(berth_value: object) -> Optional[Tuple[float, float]]:
-    if berth_value is None or pd.isna(berth_value):
-        return None
-    key = str(berth_value).strip()
-    if not key:
-        return None
-    return BERTH_METER_RANGES.get(key)
-
-
-def resolve_berth_span(row: pd.Series) -> Optional[float]:
-    berth_range = get_berth_meter_range(row.get("berth"))
-    if berth_range is None:
-        return None
-    start, end = berth_range
-    if start is None or end is None:
-        return None
-    span = float(end - start)
-    if span <= 0:
-        return None
-    return span
-
-
-def compute_item_height(row: pd.Series) -> float:
-    berth_span = resolve_berth_span(row)
-    max_height = berth_span if berth_span is not None else BERTH_VERTICAL_SPAN_PX
-    start_meter, end_meter = extract_meter_range(row)
-    if start_meter is not None and end_meter is not None:
-        lower = float(min(start_meter, end_meter))
-        upper = float(max(start_meter, end_meter))
-        span = upper - lower
-        if span > 0:
-            if berth_span is not None:
-                span = min(span, berth_span)
-            return float(max(24.0, min(max_height, span)))
-
-    length_val = row.get("loa_m")
-    if length_val is None or pd.isna(length_val):
-        length_val = row.get("length_m")
-    try:
-        numeric = float(length_val)
-    except (TypeError, ValueError):
-        numeric = None
-
-    if numeric is None or pd.isna(numeric):
-        return 86.0
-    scaled = numeric
-    return float(max(24.0, min(max_height, scaled)))
-
-
-def compute_item_offset(row: pd.Series, item_height: float) -> float:
-    def _to_float(value) -> Optional[float]:
-        if value is None or pd.isna(value):
-            return None
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
-    start_meter, end_meter = extract_meter_range(row)
-    berth_range = get_berth_meter_range(row.get("berth"))
-
-    if (
-        berth_range is not None
-        and berth_range[0] is not None
-        and berth_range[1] is not None
-        and berth_range[1] > berth_range[0]
-    ):
-        berth_start = float(berth_range[0])
-        berth_end = float(berth_range[1])
-        berth_span = berth_end - berth_start
-
-        top_anchor = _to_float(start_meter)
-        bottom_anchor = _to_float(end_meter)
-        if top_anchor is None and bottom_anchor is not None:
-            top_anchor = bottom_anchor
-        if top_anchor is None:
-            anchor_candidates: List[float] = []
-            for key in ("f_pos", "e_pos"):
-                converted = _to_float(row.get(key))
-                if converted is not None:
-                    anchor_candidates.append(converted)
-            if anchor_candidates:
-                top_anchor = min(anchor_candidates)
-
-        if top_anchor is None:
-            return 0.0
-
-        clamped_top = min(max(float(top_anchor), berth_start), berth_end)
-        offset = clamped_top - berth_start
-        max_offset = max(0.0, berth_span - item_height)
-        if max_offset < 0:
-            max_offset = 0.0
-        if offset > max_offset:
-            offset = max_offset
-        if offset < 0:
-            offset = 0.0
-        return float(offset)
-
-    # Fallback: use original baseline-based logic when 선석 범위를 알 수 없는 경우
-    anchor_candidates: List[float] = []
-    for candidate in (start_meter, end_meter, row.get("f_pos"), row.get("e_pos")):
-        converted = _to_float(candidate)
-        if converted is not None:
-            anchor_candidates.append(converted)
-
-    if not anchor_candidates:
-        return 0.0
-
-    anchor = max(anchor_candidates)
-    offset = BP_BASELINE_M - anchor
-    if offset < 0:
-        offset = 0.0
-    max_offset = max(0.0, BERTH_VERTICAL_SPAN_PX - item_height)
-    if offset > max_offset:
-        offset = max_offset
-    return float(offset)
-
 
 def build_group_label(berth: int | str) -> str:
     return (
@@ -1059,10 +910,11 @@ def render_berth_gantt(
         return prepared.drop(columns=["gantt_start"], errors="ignore"), None
 
     prepared["berth"] = prepared["berth"].astype(str)
+    prepared["berth_normalized"] = prepared["berth"].map(normalize_berth_label)
 
     berth_min, berth_max = berth_range
     if berth_whitelist is not None:
-        berth_order = [str(b) for b in berth_whitelist]
+        berth_order = normalize_berth_list(berth_whitelist)
     else:
         berth_order = [str(b) for b in range(berth_min, berth_max + 1)]
 
@@ -1073,7 +925,7 @@ def render_berth_gantt(
         & prepared["gantt_start"].notna()
         & (prepared["etd"] >= view_start)
         & (prepared["gantt_start"] <= view_end)
-        & prepared["berth"].isin(allowed_berths)
+        & prepared["berth_normalized"].isin(allowed_berths)
     )
     view_df = prepared.loc[mask].copy()
 
@@ -1118,13 +970,15 @@ def render_berth_gantt(
     resolved_group_label_map: Dict[str, str] = {}
     if group_label_map is not None:
         resolved_group_label_map = {
-            str(key): value for key, value in group_label_map.items()
+            normalize_berth_label(key): value
+            for key, value in group_label_map.items()
+            if normalize_berth_label(key)
         }
 
     groups = []
     for berth in berth_order:
         label_value = (
-            resolved_group_label_map.get(str(berth))
+            resolved_group_label_map.get(berth)
             if resolved_group_label_map
             else None
         )
@@ -1164,10 +1018,11 @@ def render_berth_gantt(
         offset_px = compute_item_offset(row, height_px)
         base_class = "berth-item gap-warning" if bool(gap_flags_map.get(idx, False)) else "berth-item"
         item_class = f"{base_class} bp-aligned"
+        group_value = row.get("berth_normalized") or row.get("berth")
         items.append(
             {
                 "id": item_id,
-                "group": str(row.get("berth")),
+                "group": str(group_value) if group_value is not None else "",
                 "start": start,
                 "end": end,
                 "content": content_html,
@@ -1322,10 +1177,16 @@ def render_berth_gantt(
                     pd.to_datetime(event_payload["end"]), snap_choice
                 )
             if "group" in event_payload and event_payload["group"] is not None:
-                updated.loc[target_index, "berth"] = str(event_payload["group"])
+                normalized = normalize_berth_label(event_payload["group"])
+                group_value = normalized or str(event_payload["group"])
+                updated.loc[target_index, "berth"] = group_value
+                updated.loc[target_index, "berth_normalized"] = normalize_berth_label(
+                    group_value
+                )
 
-    if "gantt_start" in updated.columns:
-        updated = updated.drop(columns=["gantt_start"], errors="ignore")
+    drop_columns = [col for col in ["gantt_start", "berth_normalized"] if col in updated.columns]
+    if drop_columns:
+        updated = updated.drop(columns=drop_columns, errors="ignore")
 
     return updated, event_payload
 
