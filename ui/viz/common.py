@@ -28,7 +28,7 @@ def period_str_kr(start: pd.Timestamp, end: pd.Timestamp) -> str:
     return f"{start:%Y년 %m월 %d일} ~ {end:%m월 %d일}"
 
 def _ymax_for_terminal(terminal: str) -> int:
-    return 1500 if terminal == "SND" else 1200
+    return 1500 if terminal == "SND" else 1400
 
 def _to_float(x, default=0.0):
     try:
@@ -166,7 +166,16 @@ def render_timeline_week(df: pd.DataFrame, terminal: str, title: str):
         day += pd.Timedelta(days=1)
 
     # 굵은 보조선: Y=0,300,...,1200,(1500)
-    for vy in [0, 300, 600, 900, 1200] + ([1500] if y_max >= 1500 else []):
+    def _y_major_ticks(terminal: str):
+        """터미널별 굵은 보조선(y) 위치"""
+        if terminal == "SND":
+            y_max, step = 1500, 300
+        else:  # GAM
+            y_max, step = 1400, 350
+        return list(range(0, y_max + 1, step))
+
+    major_ys = _y_major_ticks(terminal)
+    for vy in major_ys:
         fig.add_shape(
             type="line", x0=x0, x1=x1, y0=vy, y1=vy,
             xref="x", yref="y", line=dict(width=2, color="rgba(0,0,0,0.25)"), layer="below"

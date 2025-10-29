@@ -36,7 +36,7 @@ KOR_MAP = {
 }
 
 # 표준 출력 순서
-STD_ORDER = ["terminal", "berth", "vessel", "voyage", "start", "end", "stype", "bp", "f", "e", "berthing", "quarantine",]
+STD_ORDER = ["terminal", "berth", "vessel", "voyage", "start", "end", "stype", "bp", "f", "e", "berthing", "quarantine","y_m"]
 
 # ---------------------------------------------------------
 # 유틸
