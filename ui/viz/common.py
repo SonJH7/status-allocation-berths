@@ -9,14 +9,14 @@ from schema import TIME_GRID_MIN, Y_GRID_M
 KST = ZoneInfo("Asia/Seoul")
 
 # ---------------------------------------------------------
-# 지금(KST) 기준 24시간 전 ~ +5일
+# 지금(KST) 기준 24시간 전 ~ +6일
 #   - x_start: now - 24h
-#   - x_end  : now + 5d
+#   - x_end  : now + 6d
 # ---------------------------------------------------------
 def window_from_now_kst():
     now_kst = pd.Timestamp.now(tz=KST)
     start = (now_kst - pd.Timedelta(days=1)).tz_localize(None)
-    end   = (now_kst + pd.Timedelta(days=5)).tz_localize(None)
+    end   = (now_kst + pd.Timedelta(days=6)).tz_localize(None)
     now_naive = now_kst.tz_localize(None)
     return start, end, now_naive  # (x0, x1, now)
 
@@ -72,6 +72,27 @@ def render_timeline_week(df: pd.DataFrame, terminal: str, title: str):
     fig = go.Figure()
     df_show = df.sort_values(["start", "berth", "vessel"]).reset_index(drop=True)
 
+    # ==== 추가: 상태별 색상 팔레트 ====
+    def _color_for_status(status: str, terminal: str) -> str:
+        """
+        상태별 기본색. 상태 없으면 터미널 기본색.
+        - LOAD_PLANNING_DONE       -> Pink  (rgba)
+        - DISCHARGE_PLANNING_DONE  -> Blue  (rgba)
+        - CRANE_ASSIGNED           -> Yellow(rgba)
+        - CRANE_UNASSIGNED         -> Gray  (rgba)
+        """
+        palette = {
+            "LOAD_PLANNING_DONE":      "rgba(236,130,176,0.78)",  # 분홍
+            "DISCHARGE_PLANNING_DONE": "rgba(115,158,245,0.78)",  # 파랑
+            "CRANE_ASSIGNED":          "rgba(248,202,109,0.78)",  # 노랑
+            "CRANE_UNASSIGNED":        "rgba(180,180,186,0.75)",  # 회색
+        }
+        if status and status in palette:
+            return palette[status]
+        # 상태가 없으면 기존 터미널 색 유지
+        return "rgba(120,160,240,0.7)" if terminal == "SND" else "rgba(240,180,80,0.7)"
+
+
     # 막대 + 라벨
     for _, r in df_show.iterrows():
         s, e = r.get("start"), r.get("end")
@@ -82,8 +103,10 @@ def render_timeline_week(df: pd.DataFrame, terminal: str, title: str):
         y1 = max(_to_float(r.get("f", 0)), _to_float(r.get("e", 0)))
         if y0 == y1:
             y1 = y0 + 10.0
-
-        color = "rgba(120,160,240,0.7)" if terminal == "SND" else "rgba(240,180,80,0.7)"
+        # ✅ 상태 기반 색상
+        status = (r.get("plan_status") or "").strip()
+        color = _color_for_status(status, terminal)
+        # 기존코드 - color = "rgba(120,160,240,0.7)" if terminal == "SND" else "rgba(240,180,80,0.7)"
         # 실제 막대(사각형)
         fig.add_shape(
             type="rect", x0=s, x1=e, y0=y0, y1=y1,
@@ -104,6 +127,7 @@ def render_timeline_week(df: pd.DataFrame, terminal: str, title: str):
         mid_y = (y0 + y1) / 2.0
 
         # 1) 중앙: voyage(+접안)
+        note_txt = (r.get("note") or "-").strip()
         fig.add_trace(go.Scatter(
             x=[mid_t], y=[mid_y], mode="text",
             text=[center_label],
@@ -113,6 +137,7 @@ def render_timeline_week(df: pd.DataFrame, terminal: str, title: str):
                 f'접안:{berthing or "-"}  검역:{(r.get("quarantine") or "-")}<br>'
                 f'{s:%m-%d %H:%M} ~ {e:%m-%d %H:%M}<br>'
                 f'구분:{r.get("stype","")} / F:{_to_float(r.get("f")):.0f}m → E:{_to_float(r.get("e")):.0f}m'
+                f'<br>참고: {note_txt}'
             ),
             hoverinfo="text",
             showlegend=False,

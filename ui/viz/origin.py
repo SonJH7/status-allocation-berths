@@ -56,7 +56,7 @@ def render_origin_view(df_origin: pd.DataFrame, enable_drag: bool):
     - 드래그&드롭 편집은 지원하지 않음(Plotly HTML 임베드 방식).
     """
     st.subheader("📊 시각화 (SND / GAM) — 가로 스크롤 전용")
-    st.caption("가로: 오늘 기준 24시간(KST)전부터 5일 / 라벨 4시간(00시는 날짜 표기) · 보조 그리드 10분 · 세로 30m")
+    st.caption("가로: 오늘 기준 24시간(KST)전부터 6일 / 라벨 4시간(00시는 날짜 표기) · 보조 그리드 10분 · 세로 30m")
 
     tab_snd, tab_gam = st.tabs(["신선대 SND", "감만 GAM"])
 

@@ -9,6 +9,27 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from urllib.parse import quote_plus
 
+# =========================================================
+# 도움 함수 
+# =========================================================
+def _note_status_from_plan_cd(plan_cd: str) -> tuple[str, str]:
+    """
+    VslMsg의 plan_cd를 사이트와 동일한 문구/상태로 변환
+      L -> '적하 프래닝까지 완료', LOAD_PLANNING_DONE
+      D -> '양하 프래닝까지 완료', DISCHARGE_PLANNING_DONE
+      C -> '크래인배정 완료',     CRANE_ASSIGNED
+      else -> '크래인미 배정',    CRANE_UNASSIGNED
+    """
+    code = (plan_cd or "").strip().upper()
+    if code == "L":
+        return "적하 프래닝까지 완료", "LOAD_PLANNING_DONE"
+    if code == "D":
+        return "양하 프래닝까지 완료", "DISCHARGE_PLANNING_DONE"
+    if code == "C":
+        return "크래인배정 완료", "CRANE_ASSIGNED"
+    return "크래인미 배정", "CRANE_UNASSIGNED"
+
+
 # ---------------------------------------------------------
 # 1) 신선대·감만 선석배정 텍스트표 (원본 그대로)
 # ---------------------------------------------------------
@@ -50,7 +71,8 @@ def get_berth_status(time="3days", route="ALL", berth="A"):
 # ---------------------------------------------------------
 def get_all_bp_data(date=None):
     """
-    한 날짜의 모든 BP(Bitt) 정보를 수집
+    한 날짜의 모든 BP(Bitt) + 참고(note) + 상태(plan_status)
+    { (ship_cd, call_no): {"bitt": "...(F: n, E: m)", "note": "...", "plan_status": "..."} }
     """
     if date is None:
         date = datetime.now().strftime("%Y-%m-%d")
@@ -77,6 +99,11 @@ def get_all_bp_data(date=None):
     layer1_sections = soup.find_all("section", id="layer1")
     if not layer1_sections:
         return bp_dict
+    PLAN_NOTE = {
+        "L": ("LOAD_PLANNING_DONE",      "적하 프래닝까지 완료"),
+        "D": ("DISCHARGE_PLANNING_DONE", "양하 프래닝까지 완료"),
+        "C": ("CRANE_ASSIGNED",          "크래인배정 완료"),
+    }
 
     for layer1 in layer1_sections:
         for a_tag in layer1.find_all("a"):
@@ -89,8 +116,15 @@ def get_all_bp_data(date=None):
                 continue
             ship_cd = m.group(2)
             call_no = m.group(4)
+            plan_cd  = m.group(8)
             bitt    = m.group(11)
-            bp_dict[(ship_cd, call_no)] = bitt
+            note, plan_status = _note_status_from_plan_cd(plan_cd)
+
+            bp_dict[(ship_cd, call_no)] = {
+                "bitt": bitt,             # 예: "111 ( F: 1, E: 143)"
+                "note": note,             # 예: "양하 프래닝까지 완료"
+                "plan_status": plan_status
+            }
     return bp_dict
 
 def parse_bp(bp_str):
@@ -105,26 +139,36 @@ def parse_bp(bp_str):
     return (None, None, None)
 
 def add_bp_to_dataframe(df, date=None):
-    """
-    df의 '모선항차'를 이용해 BP/F/E 컬럼 추가
-    """
     if "모선항차" not in df.columns:
         return df
 
-    bp_dict = get_all_bp_data(date)
-    bp_list, f_list, e_list = [], [], []
+    bp_map = get_all_bp_data(date)
+    bp_list, f_list, e_list, note_list, status_list = [], [], [], [], []
+
     for _, row in df.iterrows():
         mocen = str(row["모선항차"]) if pd.notna(row["모선항차"]) else ""
         parts = mocen.split("-")
         if len(parts) >= 2:
             ship_cd, call_no = parts[0], parts[1]
-            bp_str = bp_dict.get((ship_cd, call_no))
+            info = bp_map.get((ship_cd, call_no))
+            if isinstance(info, dict):
+                bp_str = info.get("bitt")
+                note   = info.get("note", "")
+                status = info.get("plan_status", "")
+            else:
+                # 과거 문자열만 반환하던 케이스와 호환
+                bp_str = info
+                note, status = "", ""
             bp, f, e = parse_bp(bp_str)
         else:
-            bp, f, e = (None, None, None)
+            bp, f, e, note, status = (None, None, None, "", "")
+
         bp_list.append(bp); f_list.append(f); e_list.append(e)
+        note_list.append(note); status_list.append(status)
 
     df["bp"], df["f"], df["e"] = bp_list, f_list, e_list
+    df["note"] = note_list
+    df["plan_status"] = status_list
     return df
 
 # ---------------------------------------------------------
