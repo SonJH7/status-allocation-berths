@@ -227,21 +227,21 @@ def validate_df(df: pd.DataFrame) -> list[tuple]:
     return problems
 
 # ---------------------------------------------------------
-# 스냅(시간 10분 / 세로 30m)
+# 스냅(시간 5분 / 세로 30m)
 # ---------------------------------------------------------
-def snap_time_10min(ts: pd.Timestamp) -> pd.Timestamp:
-    """10분 스냅(반올림) - 날짜 이월 안전 처리"""
+def snap_time_5min(ts: pd.Timestamp) -> pd.Timestamp:
     if pd.isna(ts):
         return ts
     base = ts.replace(second=0, microsecond=0)
     minutes = base.hour * 60 + base.minute
-    snapped = round(minutes / TIME_GRID_MIN) * TIME_GRID_MIN
+    snapped = round(minutes / 5) * 5   # ← 5분 그리드
     h, m = divmod(snapped, 60)
     day_offset, h = divmod(h, 24)
     return (base.normalize()
             + pd.to_timedelta(day_offset, "D")
             + pd.to_timedelta(h, "H")
             + pd.to_timedelta(m, "m"))
+
 
 def snap_y_30m(y_m: float) -> float:
     """세로 m 좌표를 30m 그리드로 스냅"""
@@ -250,3 +250,45 @@ def snap_y_30m(y_m: float) -> float:
     except Exception:
         return 0.0
     return round(y_m / Y_GRID_M) * Y_GRID_M
+
+# ===== (추가) row_id 보장 =====
+def ensure_row_id(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "row_id" not in out.columns:
+        out.insert(0, "row_id", range(len(out)))
+    return out
+
+
+# ===== (추가) 정규화 ↔ 원본 동기화 =====
+#  - normalize_df와 동일 순서라고 가정하지 않고, row_id 기준으로 반영
+#  - KOR_MAP 역매핑을 사용해 가능한 컬럼만 원본에 반영
+def sync_raw_with_norm(raw_df: pd.DataFrame, norm_df: pd.DataFrame) -> pd.DataFrame:
+    if raw_df is None or norm_df is None:
+        return raw_df
+    if "row_id" not in raw_df.columns or "row_id" not in norm_df.columns:
+        # row_id가 없으면 안전하게 건드리지 않음
+        return raw_df.copy()
+
+    out = raw_df.copy()
+    # 역매핑: 표준컬럼 -> 가능한 한글 컬럼 후보(여럿일 수 있음)
+    inv = {}
+    for k, v in KOR_MAP.items():
+        inv.setdefault(v, []).append(k)
+
+    # 표준 → 원본 반영 후보
+    std_cols = ["start","end","voyage","vessel","stype","berth","bp","f","e","berthing","quarantine"]
+    g = norm_df.set_index("row_id")
+    for rid, row in g.iterrows():
+        if rid not in out["row_id"].values:
+            continue
+        mask = out["row_id"] == rid
+        for std_col in std_cols:
+            if std_col not in row.index:
+                continue
+            val = row.get(std_col)
+            # 원본 컬럼 후보들 중 존재하는 첫 번째에 씀
+            for kor_col in inv.get(std_col, []):
+                if kor_col in out.columns:
+                    out.loc[mask, kor_col] = val
+                    break
+    return out

@@ -187,11 +187,15 @@ def render_timeline_week(df: pd.DataFrame, terminal: str, title: str):
             except Exception:
                 return default
 
+        row_id = int(r.get("row_id", _))  # ← 안전 row_id
         note_txt = _safe_str(r.get("note")).strip()
         fig.add_trace(go.Scatter(
-            x=[mid_t], y=[mid_y], mode="text",
+            x=[mid_t], y=[mid_y], mode="markers+text", # ✅ 클릭 안정화: 마커+텍스트(마커는 투명)
+            marker=dict(size=27, opacity=0.01, color="rgba(0,0,0,0)"),
             text=[center_label],
-            textfont=dict(color=tcolor, size=12),  # ✅ 대비되는 글씨색 + 살짝 키움
+            textfont=dict(color=tcolor, size=12),  # ✅ 대비되는 글씨색 + 살짝 키움 
+            # ✅ 선택 식별용 데이터 
+            customdata=[row_id],
             hovertext=(
                 f'{r.get("terminal","")}-{r.get("berth","")} / '
                 f'Vessel:{r.get("vessel","")}  Voyage:{voyage}<br>'
@@ -308,6 +312,7 @@ def render_timeline_week(df: pd.DataFrame, terminal: str, title: str):
         height=600, width=2600,
         margin=dict(l=40, r=20, t=50, b=40),
         dragmode="pan",
+        clickmode="event+select",   # ✅ 클릭 이벤트 확실히
     )
 
     return fig, (x0, x1)

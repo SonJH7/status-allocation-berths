@@ -11,4 +11,5 @@ plotly>=5.22
 python-dateutil>=2.9
 streamlit-plotly-events
 numpy==1.26.4
-
+streamlit-plotly-events==0.0.6
+streamlit-js-eval==0.1.5

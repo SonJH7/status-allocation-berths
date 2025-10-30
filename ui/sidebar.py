@@ -6,7 +6,8 @@ import streamlit as st
 def _init_state():
     if "show_direct" not in st.session_state:
         st.session_state["show_direct"] = False
-
+    if "active_source" not in st.session_state:
+        st.session_state["active_source"] = "crawl"  # 기본은 크롤러
 # ---------------------------------------------------------
 # 사이드 바 설정
 # ---------------------------------------------------------
@@ -17,7 +18,7 @@ def build_sidebar():
         # 상단 타이틀/설정
         # ---------------------------------------------------------
         st.header("설정")
-        st.caption("A) 크롤러로 바로 조회 · 시각화  /  B) 직접 파일 업로드 후 불러오기 · 시각화")
+        st.caption("A) 크롤러로 바로 조회 · 시각화  /  B) 파일 업로드 후 불러오기 · 시각화")
 
         # ---------------------------------------------------------
         # (A) 조회/시각화 — 크롤러 사용
@@ -39,34 +40,45 @@ def build_sidebar():
         if open_direct:
             st.session_state["show_direct"] = True
 
-        # ---------------------------------------------------------
-        # (B) 업로드/시각화 — 사이트 CSV/XLSX 직접 투입
-        # ---------------------------------------------------------
         origin_file = None
         run_load = False
         run_viz = False
-
         if st.session_state["show_direct"]:
             st.markdown("---")
             st.subheader("파일 업로드")
-            origin_file = st.file_uploader("사이트 데이터 업로드 (CSV/XLSX)", type=["csv", "xlsx"])
-
+            origin_file = st.file_uploader("양자 데이터 업로드 (CSV/XLSX)", type=["csv", "xlsx"])
             col1, col2 = st.columns(2)
             with col1:
                 run_load = st.button("불러오기 📥", use_container_width=True)
             with col2:
-                run_viz = st.button("시각화 하기 📊", use_container_width=True)
-
+                run_viz = st.button("시각화 📊", use_container_width=True)
             st.caption("※ 닫으려면 아래 버튼을 클릭하세요.")
             if st.button("닫기 ⤴", use_container_width=True):
                 st.session_state["show_direct"] = False
 
+
         # ---------------------------------------------------------
-        # 시각화 옵션
+        # 편집/저장 컨트롤 (유효성 위쪽)
         # ---------------------------------------------------------
         st.divider()
-        st.subheader("시각화 옵션")
-        enable_drag = st.toggle("드래그&드롭 편집(가로 10분 / 세로 30m 스냅)", value=True)
+        st.subheader("편집 · 저장")
+        colx = st.columns([1,1])
+        with colx[0]:
+            cmd_undo = st.button("되돌리기(1회)", use_container_width=True)
+        with colx[1]:
+            cmd_save = st.button("저장", use_container_width=True, type="primary")
+        # ✅ 두 세트가 모두 있을 때만 '편집 대상' 노출
+        has_crawl  = bool(st.session_state.get("crawl_df") is not None and not getattr(st.session_state.get("crawl_df"), "empty", True))
+        has_upload = bool(st.session_state.get("upload_df") is not None and not getattr(st.session_state.get("upload_df"), "empty", True))
+        active_source = st.session_state.get("active_source", "crawl")
+        if has_crawl and has_upload:
+            src_label = st.radio(
+                "편집 대상 데이터", options=["크롤러", "업로드"],
+                index=(0 if active_source=="crawl" else 1),
+                horizontal=True
+            )
+            active_source = "crawl" if src_label=="크롤러" else "upload"
+            st.session_state["active_source"] = active_source
 
         # ---------------------------------------------------------
         # 유효성 경고 표시 옵션
@@ -74,39 +86,33 @@ def build_sidebar():
         st.divider()
         st.subheader("유효성 경고 표시")
         show_validation = st.toggle("유효성 경고 보기", value=True)
-        val_location = st.radio(
-            "표시 위치",
-            options=["본문(접기)", "사이드바(요약)"],
-            index=0,
-            horizontal=True,
-            disabled=not show_validation,
-        )
-
+        val_location = st.radio("표시 위치", options=["본문(접기)", "사이드바(요약)"],
+                                index=0, horizontal=True, disabled=not show_validation)
+        
         # ---------------------------------------------------------
         # 도움말
         # ---------------------------------------------------------
         st.divider()
         st.subheader("도움말")
         st.markdown(
-            "- **기간**: 오늘 기준 24시간(KST) 전부터 6일 구간입니다.\n"
-            "- **라벨**: 가로축 4시간 간격(00시는 날짜 포함), 보조 그리드 10분.\n"
-            "- **세로축**: SND 1500m / GAM 1400m, 30m 그리드. 굵은 선은 0·300·…·1500, 0·350·…·1400.\n"
-            "- **드래그**: 가로 10분, 세로 30m 스냅. 동시간대 최소 이격 30m 검증."
+            "- 두 세트가 있을 때는 **편집 대상만** 드래그&키 이동 가능(다른 하나는 읽기 전용).\n"
+            "- 그래프 편집과 원본 테이블 편집은 **동시에 하지 마세요** (둘 중 하나만).\n"
+            "- **저장**: 원본 테이블 값 변경\n"
+            "- **초기화는 ‘조회하기’로** 새로 받아오면 원본으로 돌아갑니다."
+            
         )
 
     # 컨트롤 값 반환
     return {
-        # A) 크롤러
         "add_dims": add_dims,
         "run_crawl": run_crawl,
         "run_viz_crawl": run_viz_crawl,
-        # B) 직접 업로드
         "origin_file": origin_file,
         "run_load": run_load,
         "run_viz": run_viz,
-        # 공통
-        "enable_drag": enable_drag,
-        # 유효성 표시
+        "cmd_undo": cmd_undo,
+        "cmd_save": cmd_save,
         "show_validation": show_validation,
         "val_location": val_location,
+        "active_source": active_source,   # ✅ 추가
     }
