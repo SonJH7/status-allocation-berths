@@ -9,14 +9,14 @@ from schema import TIME_GRID_MIN, Y_GRID_M
 KST = ZoneInfo("Asia/Seoul")
 
 # ---------------------------------------------------------
-# [새 규칙] 지금(KST) 기준 24시간 전 ~ +7일
+# 지금(KST) 기준 24시간 전 ~ +5일
 #   - x_start: now - 24h
-#   - x_end  : now + 7d
+#   - x_end  : now + 5d
 # ---------------------------------------------------------
 def window_from_now_kst():
     now_kst = pd.Timestamp.now(tz=KST)
     start = (now_kst - pd.Timedelta(days=1)).tz_localize(None)
-    end   = (now_kst + pd.Timedelta(days=7)).tz_localize(None)
+    end   = (now_kst + pd.Timedelta(days=5)).tz_localize(None)
     now_naive = now_kst.tz_localize(None)
     return start, end, now_naive  # (x0, x1, now)
 

@@ -49,20 +49,14 @@ def _plotly_scroll(fig_html: str, height: int = 600, min_width_px: int = 2400):
     """
     components.v1.html(wrapper, height=height+60, scrolling=True)
 
-def render_origin_view(df_origin: pd.DataFrame, terminal_filter_value: str, enable_drag: bool):
-    # 공통 제목에 기간 포함
-    # render_timeline_week() 에서 받은 (x0,x1)로 생성
-    st.subheader("📊 시각화 (SND / GAM) — 상단에 표시")
 
-    tab_snd, tab_gam = st.tabs(["신선대 SND", "감만 GAM"])
-
-def render_origin_view(df_origin: pd.DataFrame, terminal_filter_value: str, enable_drag: bool):
+def render_origin_view(df_origin: pd.DataFrame, enable_drag: bool):
     """
     가로 스크롤 전용 시각화.
     - 드래그&드롭 편집은 지원하지 않음(Plotly HTML 임베드 방식).
     """
     st.subheader("📊 시각화 (SND / GAM) — 가로 스크롤 전용")
-    st.caption("가로: 오늘 00시(KST)부터 7일 / 라벨 4시간(00시는 날짜 병기) · 보조 그리드 10분 · 세로 30m")
+    st.caption("가로: 오늘 기준 24시간(KST)전부터 5일 / 라벨 4시간(00시는 날짜 표기) · 보조 그리드 10분 · 세로 30m")
 
     tab_snd, tab_gam = st.tabs(["신선대 SND", "감만 GAM"])
 

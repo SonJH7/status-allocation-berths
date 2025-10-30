@@ -164,10 +164,12 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     out["y_m"] = out["bp"].fillna(0).astype(float)
 
     # 8) 표준 컬럼만 노출 (없으면 자동 제외)
-    out = out[[c for c in STD_ORDER if c in out.columns]]
+    std = [c for c in STD_ORDER if c in out.columns]
 
+    # 크롤러 보강치수 보존
+    extras = [c for c in ["Length(m)", "Beam(m)"] if c in out.columns]
+    out = out[std + extras]
     return out
-
 
 # ---------------------------------------------------------
 # 검증

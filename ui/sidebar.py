@@ -66,7 +66,6 @@ def build_sidebar():
         # ---------------------------------------------------------
         st.divider()
         st.subheader("시각화 옵션")
-        terminal_filter = st.radio("터미널", options=["ALL", "SND", "GAM"], horizontal=True)
         enable_drag = st.toggle("드래그&드롭 편집(가로 10분 / 세로 30m 스냅)", value=True)
 
         # ---------------------------------------------------------
@@ -89,9 +88,9 @@ def build_sidebar():
         st.divider()
         st.subheader("도움말")
         st.markdown(
-            "- **기간**: 항상 오늘 00시(KST)부터 7일 구간입니다.\n"
+            "- **기간**: 오늘 기준 24시간(KST) 전부터 5일 구간입니다.\n"
             "- **라벨**: 가로축 4시간 간격(00시는 날짜 포함), 보조 그리드 10분.\n"
-            "- **세로축**: SND 1500m / GAM 1200m, 30m 그리드. 굵은 선은 0·300·…·1500.\n"
+            "- **세로축**: SND 1500m / GAM 1400m, 30m 그리드. 굵은 선은 0·300·…·1500, 0·350·…·1400.\n"
             "- **드래그**: 가로 10분, 세로 30m 스냅. 동시간대 최소 이격 30m 검증."
         )
 
@@ -106,7 +105,6 @@ def build_sidebar():
         "run_load": run_load,
         "run_viz": run_viz,
         # 공통
-        "terminal_filter": terminal_filter,
         "enable_drag": enable_drag,
         # 유효성 표시
         "show_validation": show_validation,

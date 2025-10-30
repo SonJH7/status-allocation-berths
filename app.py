@@ -64,7 +64,7 @@ if ctrl["run_viz_crawl"] or ctrl["run_viz"]:
     if origin_df is None or origin_df.empty:
         st.warning("시각화할 데이터가 없습니다. 먼저 ‘조회하기/불러오기’를 실행하세요.")
     else:
-        render_origin_view(origin_df, ctrl["terminal_filter"], ctrl["enable_drag"])
+        render_origin_view(origin_df, ctrl["enable_drag"])
 
 # =======================
 # ② 원본 & 정규화 탭 (시각화 아래)
