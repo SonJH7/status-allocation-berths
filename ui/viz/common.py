@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from zoneinfo import ZoneInfo
 from schema import TIME_GRID_MIN, Y_GRID_M
+import re  # ← 추가
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -71,6 +72,7 @@ def render_timeline_week(df: pd.DataFrame, terminal: str, title: str):
 
     fig = go.Figure()
     df_show = df.sort_values(["start", "berth", "vessel"]).reset_index(drop=True)
+    
 
     # ==== 추가: 상태별 색상 팔레트 ====
     def _color_for_status(status: str, terminal: str) -> str:
@@ -91,7 +93,58 @@ def render_timeline_week(df: pd.DataFrame, terminal: str, title: str):
             return palette[status]
         # 상태가 없으면 기존 터미널 색 유지
         return "rgba(120,160,240,0.7)" if terminal == "SND" else "rgba(240,180,80,0.7)"
+    
+    def _text_color_for_fill(fill_rgba: str) -> str:
+        """
+        막대 배경색( rgba(...) )과 대비되도록 라벨 색을 결정.
+        알파가 있으면 흰 배경에 합성해 밝기를 추정한 뒤
+        밝으면 진한 글씨(거의 검정), 어두우면 흰 글씨를 리턴.
+        """
+        try:
+            nums = re.findall(r"[\d.]+", fill_rgba)
+            r, g, b = [float(nums[i]) for i in range(3)]
+            a = float(nums[3]) if len(nums) > 3 else 1.0
+            # 흰 배경(#fff) 위 합성
+            r = 255*(1-a) + r*a
+            g = 255*(1-a) + g*a
+            b = 255*(1-a) + b*a
+            # 상대 휘도(0~1). 임계 0.6 근처에서 가독성 좋음
+            lum = 0.2126*(r/255)**2.2 + 0.7152*(g/255)**2.2 + 0.0722*(b/255)**2.2
+            return "rgba(15,15,20,0.98)" if lum > 0.6 else "rgba(255,255,255,0.98)"
+        except Exception:
+            return "rgba(15,15,20,0.98)"
+    def _draw_berth_guides(fig, x0, x1, terminal):
+        # 선석 범위/라벨 정의 (현재 로직과 동일한 스텝: SND=300m×5, GAM=350m×4)
+        if terminal == "SND":
+            step = 300
+            labels = [f"{i}" for i in range(1, 6)]
+        else:
+            step = 350
+            gam_pairs = [(1, 9), (2, 8), (3, 7), (4, 6)]
+            labels = [f"{a}({b})" for a, b in gam_pairs]
+        # 밴드 + 레이블 (밴드는 layer='below'로 깔리고, 레이블은 좌측 안쪽에 고정)
+        for i, label in enumerate(labels):
+            y0 = i * step
+            y1 = y0 + step
 
+            # 옅은 배경 밴드(격줄과 충돌 최소화 위해 아주 옅게)
+            if i % 2 == 0:  # 한 칸 건너 밝게
+                fig.add_shape(
+                    type="rect", x0=x0, x1=x1, y0=y0, y1=y1,
+                    xref="x", yref="y", layer="below",
+                    fillcolor="rgba(0,0,0,0.03)", line=dict(width=0)
+                )
+
+            # 선석 레이블: 시작 시간선 바로 오른쪽에 살짝 띄워 배치
+            fig.add_annotation(
+                x=x0 + pd.Timedelta(minutes=20),  # 왼쪽 가장자리에서 20분 안쪽
+                y=(y0 + y1) / 2, xref="x", yref="y",
+                text=label, showarrow=False, xanchor="left", yanchor="middle",
+                font=dict(size=12, color="rgba(30,30,30,0.85)"),
+                bgcolor="rgba(255,255,255,0.35)", borderpad=2
+            )
+    # x0, x1, now_x = window_from_now_kst() 다음 등, 막대 그리기 전에
+    _draw_berth_guides(fig, x0, x1, terminal)
 
     # 막대 + 라벨
     for _, r in df_show.iterrows():
@@ -106,13 +159,14 @@ def render_timeline_week(df: pd.DataFrame, terminal: str, title: str):
         # ✅ 상태 기반 색상
         status = (r.get("plan_status") or "").strip()
         color = _color_for_status(status, terminal)
-        # 기존코드 - color = "rgba(120,160,240,0.7)" if terminal == "SND" else "rgba(240,180,80,0.7)"
+        tcolor = _text_color_for_fill(color)  # 글자색 
+
         # 실제 막대(사각형)
         fig.add_shape(
             type="rect", x0=s, x1=e, y0=y0, y1=y1,
             xref="x", yref="y",
             line=dict(width=1, color="rgba(20,20,20,0.6)"),
-            fillcolor=color, layer="above"
+            fillcolor=color, layer="below"     # ⬅️ 텍스트가 위로 올라와 보임
         )
 
         # 중앙 라벨: voyage(모선항차) 우선, 없으면 vessel
@@ -126,11 +180,18 @@ def render_timeline_week(df: pd.DataFrame, terminal: str, title: str):
         mid_t = s + (e - s) / 2
         mid_y = (y0 + y1) / 2.0
 
-        # 1) 중앙: voyage(+접안)
-        note_txt = (r.get("note") or "-").strip()
+        def _safe_str(x, default="-"):
+            try:
+                s = str(x)
+                return default if s.lower() in {"nan", "none"} else s
+            except Exception:
+                return default
+
+        note_txt = _safe_str(r.get("note")).strip()
         fig.add_trace(go.Scatter(
             x=[mid_t], y=[mid_y], mode="text",
             text=[center_label],
+            textfont=dict(color=tcolor, size=12),  # ✅ 대비되는 글씨색 + 살짝 키움
             hovertext=(
                 f'{r.get("terminal","")}-{r.get("berth","")} / '
                 f'Vessel:{r.get("vessel","")}  Voyage:{voyage}<br>'
@@ -157,8 +218,10 @@ def render_timeline_week(df: pd.DataFrame, terminal: str, title: str):
                 textposition="bottom center",
                 textfont=dict(color="rgba(220,30,30,0.95)"),  # ✅ 빨간색 적용
             ))
-        Y_INSET = 5.0
-        y_top_inside = y0 + Y_INSET
+        # (수정) 막대 높이의 4% 또는 최소 12m만큼 안쪽으로
+        inset_ratio = 0.05 if terminal == "SND" else 0.07
+        inset_m = max(12.0, inset_ratio * (y1 - y0))
+        y_top_inside = min(y0 + inset_m, y1 - 6)  # 절대 범위 밖으로 못 나가게 클램프
         # 좌상단: 시작 '시'만 (예: 17:00 → "17")
         start_hour = int(pd.to_datetime(s).hour)
         fig.add_annotation(
@@ -215,7 +278,7 @@ def render_timeline_week(df: pd.DataFrame, terminal: str, title: str):
         fig.add_annotation(
             x=now_x, y=y_max, xref="x", yref="y",
             text="지금", showarrow=True, arrowhead=2, ax=0, ay=-24,
-            font=dict(color="rgba(220,30,30,1)", size=12)
+            font=dict(color="rgba(0,0,0,1)", size=12)
         )
 
     # 라벨(4h), 보조눈금(10min)

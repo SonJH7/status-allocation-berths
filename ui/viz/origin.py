@@ -42,6 +42,19 @@ def _plotly_scroll(fig_html: str, height: int = 600, min_width_px: int = 2400):
     # 가로 스크롤 가능 컨테이너 (오직 이 방식만 사용)
     wrapper = f"""
     <div style="width:100%; overflow-x:auto; padding-bottom:8px;">
+      <style>
+        /* 모드바를 왼쪽으로 이동 */
+        .modebar, .modebar-container {{
+          left: 8px !important;
+          right: auto !important;
+          top: 6px !important;
+        }}
+        /* 보기 좋게 약간 불투명하게 (선택) */
+        .modebar {{
+          background: rgba(255,255,255,0.6);
+          border-radius: 6px;
+        }}
+      </style>
       <div style="width: {min_width_px}px;">
         {fig_html}
       </div>
