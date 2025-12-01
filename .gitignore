@@ -8,7 +8,6 @@ __pycache__/
 
 # Distribution / packaging
 .Python
-build/
 develop-eggs/
 dist/
 downloads/
@@ -205,7 +204,6 @@ cython_debug/
 # Frontend build artifacts
 node_modules/
 npm-debug.log*
-streamlit_drag_timeline/frontend/build/
 
 # Marimo
 marimo/_static/
