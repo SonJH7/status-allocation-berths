@@ -318,7 +318,7 @@ def collect_berth_info(
         )
 
     if df.empty:
-        return pd.DataFrame({"알림": ["데이터를 가져올 수 없습니다."]})
+        return pd.DataFrame()  # 빈 DataFrame 반환
 
     if add_dims:
         df = enrich_with_length_beam(df, ship_name_column="선박명", debug=debug)
