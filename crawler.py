@@ -31,20 +31,51 @@ def _note_status_from_plan_cd(plan_cd: str) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------
-# 1) 신선대·감만 선석배정 텍스트표 (원본 그대로)
+# 1) 신선대·감만 선석배정 텍스트표 (유연한 조회 옵션)
 # ---------------------------------------------------------
-def get_berth_status(time="3days", route="ALL", berth="A"):
+def get_berth_status(
+    time="3days",
+    route="ALL", 
+    berth="A",
+    company="",
+    order="item1",
+    year1=None, month1=None, day1=None,
+    year2=None, month2=None, day2=None
+):
     """
     신선대감만터미널 선석배정 현황 조회
+    
+    Args:
+        time: 조회기간 - "3days"(4일), "week"(일주일), "month"(한달), "term"(직접입력)
+        route: 항로구분 - "ALL"(전체), "EA"(동남아), "JP"(일본), "CN"(중국)
+        berth: 선석구분 - "A"(전체), "S"(신선대), "G"(감만)
+        company: 선사 검색어 (선택)
+        order: 정렬기준 - "item1"(출항일시), "item2"(입항예정일시), "item3"(선석)
+        year1, month1, day1, year2, month2, day2: time="term"일 때 사용할 날짜 범위
     """
     url = "https://info.bptc.co.kr/Berth_status_text_servlet_sw_kr"
     payload = {
         "v_time": time,
         "ROCD": route,
-        "v_oper_cd": "",
-        "ORDER": "item1",
+        "v_oper_cd": company,
+        "ORDER": order,
         "v_gu": berth,
     }
+    
+    # term(직접입력)일 경우 날짜 범위 추가
+    if time == "term":
+        if all([year1, month1, day1, year2, month2, day2]):
+            payload.update({
+                "YEAR1": str(year1),
+                "MONTH1": str(month1),
+                "DAY1": str(day1),
+                "YEAR2": str(year2),
+                "MONTH2": str(month2),
+                "DAY2": str(day2),
+            })
+        else:
+            raise ValueError("term 선택 시 year1, month1, day1, year2, month2, day2를 모두 제공해야 합니다.")
+    
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         "Referer": "https://info.bptc.co.kr/content/sw/frame/berth_status_text_frame_sw_kr.jsp?p_id=BETX_SH_KR&snb_num=2&snb_div=service",
@@ -242,17 +273,49 @@ def enrich_with_length_beam(df: pd.DataFrame, ship_name_column="선박명", debu
 # ---------------------------------------------------------
 # 4) 통합 수집 (A/B/ALL, BP 추가, VF 추가는 옵션)
 # ---------------------------------------------------------
-def collect_berth_info(time="3days", route="ALL", berth="A", add_bp=True, add_dims=False, debug=False):
+def collect_berth_info(
+    time="3days",
+    route="ALL",
+    berth="A",
+    company="",
+    order="item1",
+    add_bp=True,
+    add_dims=False,
+    debug=False,
+    year1=None, month1=None, day1=None,
+    year2=None, month2=None, day2=None
+):
     """
-    time: "oneday" | "3days" | "1week" | "2week"
-    berth: "A" | "B" | "ALL"
+    신선대·감만 선석배정 크롤링 메인
+    
+    Args:
+        time: 조회기간 - "3days"(4일), "week"(일주일), "month"(한달), "term"(직접입력)
+        route: 항로구분 - "ALL"(전체), "EA"(동남아), "JP"(일본), "CN"(중국)
+        berth: 선석구분 - "A"(전체), "S"(신선대), "G"(감만)
+        company: 선사 검색어
+        order: 정렬기준 - "item1"(출항일시), "item2"(입항예정일시), "item3"(선석)
+        add_bp: BP(Bitt) + 상태 추가
+        add_dims: 선박 제원(LOA, Beam) 추가 (느림)
+        year1~day2: term 선택 시 날짜 범위
     """
     if berth == "ALL":
-        df_a = get_berth_status(time=time, route=route, berth="A")
-        df_b = get_berth_status(time=time, route=route, berth="B")
+        df_a = get_berth_status(
+            time=time, route=route, berth="A", company=company, order=order,
+            year1=year1, month1=month1, day1=day1,
+            year2=year2, month2=month2, day2=day2
+        )
+        df_b = get_berth_status(
+            time=time, route=route, berth="B", company=company, order=order,
+            year1=year1, month1=month1, day1=day1,
+            year2=year2, month2=month2, day2=day2
+        )
         df = pd.concat([df_a, df_b], ignore_index=True)
     else:
-        df = get_berth_status(time=time, route=route, berth=berth)
+        df = get_berth_status(
+            time=time, route=route, berth=berth, company=company, order=order,
+            year1=year1, month1=month1, day1=day1,
+            year2=year2, month2=month2, day2=day2
+        )
 
     if df.empty:
         return pd.DataFrame({"알림": ["데이터를 가져올 수 없습니다."]})
