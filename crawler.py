@@ -8,6 +8,7 @@ import pandas as pd
 from bs4 import BeautifulSoup
 from datetime import datetime
 from urllib.parse import quote_plus
+from functools import lru_cache
 
 # =========================================================
 # 도움 함수 
@@ -31,6 +32,27 @@ def _note_status_from_plan_cd(plan_cd: str) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------
+_bptc_session = requests.Session()
+_bptc_session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36',
+})
+
+@lru_cache(maxsize=32)
+def _fetch_berth_html(payload_items: tuple):
+    """
+    같은 조건 반복 조회 시 네트워크 호출을 캐시한다.
+    payload_items: payload.items()를 정렬한 튜플.
+    """
+    url = 'https://info.bptc.co.kr/Berth_status_text_servlet_sw_kr'
+    payload = dict(payload_items)
+    headers = {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Referer': 'https://info.bptc.co.kr/content/sw/frame/berth_status_text_frame_sw_kr.jsp?p_id=BETX_SH_KR&snb_num=2&snb_div=service',
+    }
+    res = _bptc_session.post(url, data=payload, headers=headers, timeout=10)
+    res.encoding = 'euc-kr'
+    return res.text
+
 # 1) 신선대·감만 선석배정 텍스트표 (유연한 조회 옵션)
 # ---------------------------------------------------------
 def get_berth_status(
@@ -76,14 +98,9 @@ def get_berth_status(
         else:
             raise ValueError("term 선택 시 year1, month1, day1, year2, month2, day2를 모두 제공해야 합니다.")
     
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Referer": "https://info.bptc.co.kr/content/sw/frame/berth_status_text_frame_sw_kr.jsp?p_id=BETX_SH_KR&snb_num=2&snb_div=service",
-    }
-    res = requests.post(url, data=payload, headers=headers, timeout=20)
-    res.encoding = "euc-kr"
+    html = _fetch_berth_html(tuple(sorted(payload.items())))
 
-    soup = BeautifulSoup(res.text, "html.parser")
+    soup = BeautifulSoup(html, "html.parser")
     table = soup.find("table")
     if not table:
         return pd.DataFrame()
@@ -100,6 +117,7 @@ def get_berth_status(
 # ---------------------------------------------------------
 # 2) G 화면에서 BP(Bitt) 정보 (원본 그대로)
 # ---------------------------------------------------------
+@lru_cache(maxsize=16)
 def get_all_bp_data(date=None):
     """
     한 날짜의 모든 BP(Bitt) + 참고(note) + 상태(plan_status)
@@ -119,9 +137,8 @@ def get_all_bp_data(date=None):
     }
     headers = {
         "Referer": "https://info.bptc.co.kr/content/sw/frame/berth_g_frame_sw_kr.jsp?p_id=BEGR_SH_KR&snb_num=2&snb_div=service",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     }
-    res = requests.get(url, params=params, headers=headers, timeout=20)
+    res = _bptc_session.get(url, params=params, headers=headers, timeout=10)
     res.encoding = "euc-kr"
 
     soup = BeautifulSoup(res.text, "html.parser")

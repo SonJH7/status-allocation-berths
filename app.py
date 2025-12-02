@@ -86,14 +86,53 @@ def _show_pending_toast():
 # -----------------------------------------------------------------------------
 # 핸들러: 데이터 획득(크롤링/업로드)
 # -----------------------------------------------------------------------------
-def handle_crawl_fetch(add_dims: bool):
+def handle_crawl_fetch(
+    time: str,
+    route: str,
+    berth: str,
+    company: str,
+    order: str,
+    add_bp: bool,
+    add_dims: bool,
+    debug: bool,
+    term_start=None,
+    term_end=None,
+):
     """
-    [크롤링 조회] 버튼 클릭 시 호출됩니다.
-    - 원본 수집 후 ensure_row_id · normalize_df 로 정규화, 세트(crawl_*)에 반영
-    - 시각화는 숨김(표만 보이게) show_viz=False
+    [크롤 조회] 버튼 클릭 시 호출됩니다.
+    - 원본 크롤 데이터를 ensure_row_id 후 normalize_df 로 정규화, 상태(crawl_*)를 갱신
+    - 시각화는 숨김(표 편집 모드) show_viz=False
     """
-    with st.spinner("크롤링 데이터를 가져오는 중입니다..."):
-        raw = collect_berth_info(add_bp=True, add_dims=add_dims)
+    year1 = month1 = day1 = year2 = month2 = day2 = None
+    if time == "term":
+        if not term_start or not term_end:
+            st.warning("직접 입력을 선택하면 시작/종료 날짜를 모두 입력하세요.")
+            return
+        if term_start > term_end:
+            st.warning("시작일이 종료일보다 늦을 수 없습니다.")
+            return
+        year1, month1, day1 = term_start.year, term_start.month, term_start.day
+        year2, month2, day2 = term_end.year, term_end.month, term_end.day
+
+    company_clean = (company or "").strip().upper()
+
+    with st.spinner("크롤 데이터 조회 중입니다..."):
+        raw = collect_berth_info(
+            time=time,
+            route=route,
+            berth=berth,
+            company=company_clean,
+            order=order,
+            add_bp=add_bp,
+            add_dims=add_dims,
+            debug=debug,
+            year1=year1,
+            month1=month1,
+            day1=day1,
+            year2=year2,
+            month2=month2,
+            day2=day2,
+        )
         raw = ensure_row_id(raw)
         norm = ensure_row_id(normalize_df(raw))
 
@@ -105,9 +144,8 @@ def handle_crawl_fetch(add_dims: bool):
         st.session_state["logs_crawl"] = []
 
         st.session_state["active_source"] = "crawl"
-        st.session_state["show_viz"] = False  # 조회 직후엔 표만
+        st.session_state["show_viz"] = False  # 조회 직후 표 모드
         st.success(f"조회 완료: 원본 {len(raw)}건 / 정규화 {len(norm)}건")
-
 
 def handle_file_load(upload_file):
     """
@@ -417,9 +455,20 @@ def main():
     # A) 조회/불러오기
     if ctrl.get("run_crawl"):
         try:
-            handle_crawl_fetch(add_dims=ctrl["add_dims"])
+            handle_crawl_fetch(
+                time=ctrl["time"],
+                route=ctrl["route"],
+                berth=ctrl["berth"],
+                company=ctrl["company"],
+                order=ctrl["order"],
+                add_bp=ctrl["add_bp"],
+                add_dims=ctrl["add_dims"],
+                debug=ctrl["debug"],
+                term_start=ctrl["term_start"],
+                term_end=ctrl["term_end"],
+            )
         except Exception as e:
-            st.error(f"오류: {e}")
+            st.error(f"����: {e}")
 
     if ctrl.get("run_load"):
         try:
