@@ -8,7 +8,7 @@
 
 ## 빠른 실행
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 streamlit run app.py
@@ -17,4 +17,4 @@ streamlit run app.py
 ## 배포
 - **Streamlit Cloud**: `requirements.txt` + `packages.txt` 추가. 앱 첫 실행 시 브라우저 바이너리 설치를 위해 `app.py`가 `playwright install chromium`을 한 번 시도합니다.
 
-> 외부(BPTC) 페이지에 **쓰기**는 하지 않습니다(읽기 전용 크롤링).
+> https://quailab-bptopt.streamlit.app/
