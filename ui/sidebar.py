@@ -2,6 +2,35 @@
 # ui/sidebar.py
 # =========================
 import streamlit as st
+from datetime import date, timedelta
+
+
+PERIOD_OPTIONS = {
+    "최근 4일": "3days",
+    "최근 1주": "week",
+    "최근 1개월": "month",
+    "직접 기간 선택": "term",
+}
+
+ROUTE_OPTIONS = {
+    "전체": "ALL",
+    "동남아": "EA",
+    "일본": "JP",
+    "중국": "CN",
+}
+
+BERTH_OPTIONS = {
+    "전체": "A",
+    "신항": "S",
+    "감만": "G",
+}
+
+ORDER_OPTIONS = {
+    "출항일시": "item1",
+    "입항예정일시": "item2",
+    "선석": "item3",
+}
+
 
 
 def _init_state():
@@ -17,9 +46,6 @@ def _init_state():
 def build_sidebar():
     _init_state()
     with st.sidebar:
-        # ---------------------------------------------------------
-        # 상단 타이틀/설명
-        # ---------------------------------------------------------
         st.header("설정")
         st.caption("A) 크롤링 데이터 조회 · 시각화  /  B) 파일 직접 불러오기 · 시각화")
 
@@ -27,7 +53,50 @@ def build_sidebar():
         # (A) 조회/시각화 - 크롤링 세트
         # ---------------------------------------------------------
         st.subheader("A) 크롤링 조회/시각화")
+        st.markdown("**1) Selectable Period Search**")
+
+        period_label = st.selectbox(
+            "조회 기간",
+            options=list(PERIOD_OPTIONS.keys()),
+            index=0,
+        )
+        time_code = PERIOD_OPTIONS[period_label]
+
+        today = date.today()
+        default_start = today - timedelta(days=3)
+        default_end = today
+        term_start = default_start
+        term_end = default_end
+        if time_code == "term":
+            c1, c2 = st.columns(2)
+            with c1:
+                term_start = st.date_input("시작일", value=default_start, key="crawl-term-start")
+            with c2:
+                term_end = st.date_input("종료일", value=default_end, key="crawl-term-end")
+
+        route_label = st.selectbox("항로", options=list(ROUTE_OPTIONS.keys()), index=0)
+        berth_label = st.selectbox("선석 구분", options=list(BERTH_OPTIONS.keys()), index=0)
+        order_label = st.selectbox("정렬 기준", options=list(ORDER_OPTIONS.keys()), index=0)
+        company = st.text_input("선사 검색", value="", placeholder="예: HMM, ONE, MSC")
         add_dims = st.toggle("VesselFinder 길이/흘수 포함 (느릴 때 꺼두기)", value=False)
+
+        crawl_filters = {
+            "time": time_code,
+            "time_label": period_label,
+            "route": ROUTE_OPTIONS[route_label],
+            "route_label": route_label,
+            "berth": BERTH_OPTIONS[berth_label],
+            "berth_label": berth_label,
+            "company": company.strip(),
+            "order": ORDER_OPTIONS[order_label],
+            "order_label": order_label,
+            "start_date": term_start if time_code == "term" else None,
+            "end_date": term_end if time_code == "term" else None,
+        }
+
+        if time_code == "term" and term_start > term_end:
+            st.warning("직접 기간 선택에서는 시작일이 종료일보다 늦을 수 없습니다.")
+
         col = st.columns(2)
         with col[0]:
             run_crawl = st.button("조회하기 실행", use_container_width=True)
@@ -109,6 +178,7 @@ def build_sidebar():
         st.divider()
         st.subheader("도움말")
         st.markdown(
+            "- 1) Selectable Period Search는 **조회 기간/항로/선석/선사/정렬**을 조합해 검색합니다.\n"
             "- 두 데이터가 있을 때는 **선택 데이터**만 드래그&키 이동 가능합니다 (다른 하나는 읽기 전용).\n"
             "- 그래프 편집 후 표 데이터는 **저장해야 확정**됩니다 (저장 전에는 되돌리기 가능).\n"
             "- **저장**: 원본 테이블까지 동기화\n"
@@ -118,6 +188,7 @@ def build_sidebar():
 
     return {
         "add_dims": add_dims,
+        "crawl_filters": crawl_filters,
         "run_crawl": run_crawl,
         "run_viz_crawl": run_viz_crawl,
         "origin_file": origin_file,

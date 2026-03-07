@@ -69,6 +69,8 @@ def _init_all_session_keys():
         # 플래그
         "show_viz": False,
         "active_source": "crawl",  # 기본: 크롤링
+        "last_crawl_filters": None,
+        "crawl_filter_summary": "",
     }
     for k, v in defaults.items():
         _ensure_ss(k, v)
@@ -86,14 +88,96 @@ def _show_pending_toast():
 # -----------------------------------------------------------------------------
 # 핸들러: 데이터 획득(크롤링/업로드)
 # -----------------------------------------------------------------------------
-def handle_crawl_fetch(add_dims: bool):
+def _split_date_parts(value):
+    if value is None:
+        return None, None, None
+    return int(value.year), int(value.month), int(value.day)
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _cached_collect_berth_info(
+    time_code: str,
+    route: str,
+    berth: str,
+    company: str,
+    order: str,
+    add_dims: bool,
+    year1,
+    month1,
+    day1,
+    year2,
+    month2,
+    day2,
+):
+    return collect_berth_info(
+        time=time_code,
+        route=route,
+        berth=berth,
+        company=company,
+        order=order,
+        add_bp=True,
+        add_dims=add_dims,
+        year1=year1,
+        month1=month1,
+        day1=day1,
+        year2=year2,
+        month2=month2,
+        day2=day2,
+    )
+
+
+def _format_crawl_filter_summary(crawl_filters: dict, add_dims: bool) -> str:
+    period = crawl_filters.get("time_label", crawl_filters.get("time", "최근 4일"))
+    if crawl_filters.get("time") == "term" and crawl_filters.get("start_date") and crawl_filters.get("end_date"):
+        start = crawl_filters["start_date"]
+        end = crawl_filters["end_date"]
+        period = f"{period} ({start:%Y-%m-%d} ~ {end:%Y-%m-%d})"
+
+    company = crawl_filters.get("company") or "전체"
+    dims = "포함" if add_dims else "미포함"
+    return (
+        f"기간: {period} · 항로: {crawl_filters.get('route_label', '전체')} · "
+        f"선석: {crawl_filters.get('berth_label', '전체')} · 선사: {company} · "
+        f"정렬: {crawl_filters.get('order_label', '출항일시')} · 제원: {dims}"
+    )
+
+
+def handle_crawl_fetch(crawl_filters: dict, add_dims: bool):
     """
     [크롤링 조회] 버튼 클릭 시 호출됩니다.
-    - 원본 수집 후 ensure_row_id · normalize_df 로 정규화, 세트(crawl_*)에 반영
+    - Selectable Period Search 조건을 collect_berth_info에 그대로 전달합니다.
+    - 원본 수집 후 ensure_row_id · normalize_df 로 정규화, 세트(crawl_*)에 반영합니다.
     - 시각화는 숨김(표만 보이게) show_viz=False
     """
+    if not crawl_filters:
+        raise ValueError("크롤링 조회 조건이 없습니다.")
+
+    start_date = crawl_filters.get("start_date")
+    end_date = crawl_filters.get("end_date")
+    if crawl_filters.get("time") == "term":
+        if start_date is None or end_date is None:
+            raise ValueError("직접 기간 선택에서는 시작일과 종료일을 모두 입력해야 합니다.")
+        if start_date > end_date:
+            raise ValueError("직접 기간 선택에서는 시작일이 종료일보다 늦을 수 없습니다.")
+
+    year1, month1, day1 = _split_date_parts(start_date)
+    year2, month2, day2 = _split_date_parts(end_date)
+
     with st.spinner("크롤링 데이터를 가져오는 중입니다..."):
-        raw = collect_berth_info(add_bp=True, add_dims=add_dims)
+        raw = _cached_collect_berth_info(
+            time_code=crawl_filters["time"],
+            route=crawl_filters["route"],
+            berth=crawl_filters["berth"],
+            company=crawl_filters.get("company", ""),
+            order=crawl_filters["order"],
+            add_dims=add_dims,
+            year1=year1,
+            month1=month1,
+            day1=day1,
+            year2=year2,
+            month2=month2,
+            day2=day2,
+        )
         raw = ensure_row_id(raw)
         norm = ensure_row_id(normalize_df(raw))
 
@@ -103,6 +187,8 @@ def handle_crawl_fetch(add_dims: bool):
         st.session_state["snapshot_crawl"] = norm.copy()
         st.session_state["undo_df_crawl"] = None
         st.session_state["logs_crawl"] = []
+        st.session_state["last_crawl_filters"] = crawl_filters.copy()
+        st.session_state["crawl_filter_summary"] = _format_crawl_filter_summary(crawl_filters, add_dims=add_dims)
 
         st.session_state["active_source"] = "crawl"
         st.session_state["show_viz"] = False  # 조회 직후엔 표만
@@ -410,14 +496,14 @@ def main():
     5) 시각화(좌/우 비교) + 검증 요약
     6) 원본 테이블(좌/우 비교) 렌더
     """
-    ctrl = build_sidebar()
     _init_all_session_keys()
+    ctrl = build_sidebar()
     _show_pending_toast()
 
     # A) 조회/불러오기
     if ctrl.get("run_crawl"):
         try:
-            handle_crawl_fetch(add_dims=ctrl["add_dims"])
+            handle_crawl_fetch(crawl_filters=ctrl["crawl_filters"], add_dims=ctrl["add_dims"])
         except Exception as e:
             st.error(f"오류: {e}")
 
@@ -429,6 +515,9 @@ def main():
 
     # B) 사이드바 액션 (시각화/되돌리기/저장)
     handle_sidebar_actions(ctrl)
+
+    if st.session_state.get("crawl_filter_summary"):
+        st.info(f"현재 조회 조건 · {st.session_state['crawl_filter_summary']}")
 
     # C) 메인 시각화 + 검증
     render_visualizations_and_validation(ctrl)
