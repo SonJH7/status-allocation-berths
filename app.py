@@ -142,6 +142,18 @@ def _format_crawl_filter_summary(crawl_filters: dict, add_dims: bool) -> str:
     )
 
 
+def _format_feature_summary(ctrl: dict) -> str:
+    def _onoff(flag: bool) -> str:
+        return "ON" if flag else "OFF"
+
+    return (
+        f"1) Search {_onoff(bool(ctrl.get('feature_search', True)))} · "
+        f"2) QC 준비중 · 3) Classical 준비중 · "
+        f"4) Edit {_onoff(bool(ctrl.get('feature_edit', True)))} · "
+        f"5) Compare {_onoff(bool(ctrl.get('feature_compare', True)))}"
+    )
+
+
 def handle_crawl_fetch(crawl_filters: dict, add_dims: bool):
     """
     [크롤링 조회] 버튼 클릭 시 호출됩니다.
@@ -332,13 +344,15 @@ def render_visualizations_and_validation(ctrl: dict):
     """
     메인 시각화 블록과 검증(정규화 DF 기반)을 그립니다.
     - show_viz=True일 때만 시각화 출력
-    - 두 세트가 있을 때 [편집 대상(인터랙티브), 아래: 읽기 전용]으로 배치
-    - 검증은 편집 대상 세트의 정규화 DF 기반으로 사이드바/본문 요약을 표시(테이블은 숨김)
-    - React 드래그 토글이 켜져 있으면 Plotly 대신 React 편집기를 사용
+    - feature_edit=False 이면 읽기 전용 시각화만 보여줍니다.
+    - feature_compare=False 이면 두 세트가 있어도 선택 데이터만 보여줍니다.
+    - React 드래그 토글이 켜져 있으면 Plotly 대신 React 편집기를 사용합니다.
     """
     has_crawl = not st.session_state["crawl_df"].empty
     has_upload = not st.session_state["upload_df"].empty
     use_react_drag = bool(ctrl.get("use_react_drag"))
+    feature_edit = bool(ctrl.get("feature_edit", True))
+    feature_compare = bool(ctrl.get("feature_compare", True))
 
     if not st.session_state["show_viz"]:
         return
@@ -347,46 +361,52 @@ def render_visualizations_and_validation(ctrl: dict):
         st.warning("시각화할 데이터가 없습니다. 먼저 조회하기/불러오기를 실행하세요.")
         return
 
-    # 검증(정규화 DF 기반) - 편집 대상
+    # 검증(편집 버퍼 기준) - 편집 대상
     if ctrl.get("show_validation"):
         src = ctrl["active_source"]
-        df_for_validation = st.session_state["crawl_df"] if src == "crawl" else st.session_state["upload_df"]
+        df_for_validation = st.session_state["edit_df_crawl"] if src == "crawl" else st.session_state["edit_df_upload"]
         if not df_for_validation.empty:
             show_validation("정규화 검증", df_for_validation, visible=True, location=ctrl["val_location"])
 
-    def _render_editor(df_use):
-        if use_react_drag:
-            with st.spinner("React 드래그 편집기 로딩 중..."):
-                render_origin_view_drag(df_use)
+    def _render_active_source(source: str):
+        df_use = st.session_state["crawl_df"] if source == "crawl" else st.session_state["upload_df"]
+        if feature_edit:
+            _bind_edit_context(source)
+            if use_react_drag:
+                with st.spinner("React 드래그 편집기 로딩 중..."):
+                    render_origin_view_drag(df_use)
+            else:
+                render_origin_view(df_use)
+            _persist_edit_context(source)
         else:
-            render_origin_view(df_use)
+            title_prefix = "크롤링" if source == "crawl" else "업로드"
+            render_origin_view_static(df_use, title_prefix=title_prefix)
 
-    # 시각화(좌/우 또는 단독)
-    if has_crawl and has_upload:
-        st.subheader("크롤링/업로드 비교 시각화(위: 편집 대상 · 아래: 읽기 전용)")
+    if has_crawl and has_upload and feature_compare:
+        st.subheader("크롤링/업로드 비교 시각화 (위: 선택 데이터 · 아래: 비교 대상)")
         src = ctrl["active_source"]
         if src == "crawl":
-            _bind_edit_context("crawl")
-            _render_editor(st.session_state["crawl_df"])  # 인터랙티브
-            _persist_edit_context("crawl")
+            _render_active_source("crawl")
             st.markdown("---")
             render_origin_view_static(st.session_state["upload_df"], title_prefix="업로드")
         else:
-            _bind_edit_context("upload")
-            _render_editor(st.session_state["upload_df"])  # 인터랙티브
-            _persist_edit_context("upload")
+            _render_active_source("upload")
             st.markdown("---")
             render_origin_view_static(st.session_state["crawl_df"], title_prefix="크롤링")
+        return
+
+    if has_crawl and has_upload and not feature_compare:
+        selected_label = "크롤링" if ctrl["active_source"] == "crawl" else "업로드"
+        st.subheader(f"선택 데이터 시각화 ({selected_label})")
+        st.caption("5) Data & Visual Comparison이 꺼져 있어 선택 데이터만 표시합니다.")
+        _render_active_source(ctrl["active_source"])
+        return
+
+    # 단일 세트만 존재하는 경우
+    if has_crawl:
+        _render_active_source("crawl")
     else:
-        # 단일 세트만 존재하는 경우
-        if has_crawl:
-            _bind_edit_context("crawl")
-            _render_editor(st.session_state["crawl_df"])
-            _persist_edit_context("crawl")
-        else:
-            _bind_edit_context("upload")
-            _render_editor(st.session_state["upload_df"])
-            _persist_edit_context("upload")
+        _render_active_source("upload")
 
 
 # -----------------------------------------------------------------------------
@@ -460,19 +480,26 @@ def _render_raw_panel(source_key: str, label: str, editable: bool):
 def render_raw_tables(ctrl: dict):
     """
     원본 테이블 UI를 그립니다.
-    - 두 세트가 있을 때/없을 때 다른 배치, 편집 대상만 수정 가능
+    - feature_compare=True 이면 두 세트 비교, False 이면 선택 데이터만 표시합니다.
     - 하나만 있을 때는 해당 세트만 표시(편집 허용)
     """
     has_crawl = not st.session_state["crawl_df"].empty
     has_upload = not st.session_state["upload_df"].empty
+    feature_compare = bool(ctrl.get("feature_compare", True))
 
-    if has_crawl and has_upload:
+    if has_crawl and has_upload and feature_compare:
         st.subheader("🧾 원본 테이블 비교 (좌: 크롤링 / 우: 업로드)")
         c1, c2 = st.columns(2)
         with c1:
             _render_raw_panel("crawl", "크롤링", editable=(ctrl["active_source"] == "crawl"))
         with c2:
             _render_raw_panel("upload", "업로드", editable=(ctrl["active_source"] == "upload"))
+    elif has_crawl and has_upload:
+        src = ctrl["active_source"]
+        label = "크롤링" if src == "crawl" else "업로드"
+        st.subheader(f"🧾 원본 테이블 ({label})")
+        st.caption("5) Data & Visual Comparison이 꺼져 있어 선택 데이터만 표시합니다.")
+        _render_raw_panel(src, label, editable=True)
     elif has_crawl:
         st.subheader("🧾 원본 테이블(크롤링)")
         _render_raw_panel("crawl", "크롤링", editable=True)
@@ -481,6 +508,7 @@ def render_raw_tables(ctrl: dict):
         _render_raw_panel("upload", "업로드", editable=True)
     else:
         st.info("좌측 사이드바에서 '조회하기' 또는 '불러오기'를 먼저 실행하세요.")
+
 
 
 # -----------------------------------------------------------------------------
@@ -518,6 +546,7 @@ def main():
 
     if st.session_state.get("crawl_filter_summary"):
         st.info(f"현재 조회 조건 · {st.session_state['crawl_filter_summary']}")
+    st.caption(f"연구 기능 상태 · {_format_feature_summary(ctrl)}")
 
     # C) 메인 시각화 + 검증
     render_visualizations_and_validation(ctrl)
