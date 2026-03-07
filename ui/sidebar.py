@@ -368,7 +368,7 @@ def build_sidebar():
 
         _anchor("sb-feature-edit")
         with st.expander("4) Drag & Drop (Edit)", expanded=feature_edit):
-            st.caption("편집기를 켜면 Plotly/React 편집이 가능하고, 끄면 읽기 전용 시각화로 봅니다.")
+            st.caption("편집기를 켜면 Plotly/React 편집이 가능하고, 끄면 읽기 전용 시각화로 봅니다. 활성화 시키고 잠시 대기해주세요")
             if not feature_edit:
                 st.info("현재 Edit가 꺼져 있어 읽기 전용 시각화로 동작합니다.")
 
