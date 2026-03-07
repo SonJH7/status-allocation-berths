@@ -4,10 +4,75 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Streamlit Drag Timeline</title>
-    <script type="module" crossorigin src="./assets/index-Btl5RhrT.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-CkoKxHO1.css">
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        font-family: "Manrope", "Noto Sans KR", "Segoe UI", system-ui, -apple-system, sans-serif;
+      }
+      #root {
+        min-height: 360px;
+      }
+      .timeline-boot-shell {
+        min-height: 320px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px 16px;
+        background: linear-gradient(180deg, #f8fbff 0%, #f2f4f8 100%);
+        border-radius: 14px;
+        border: 1px solid rgba(0, 0, 0, 0.04);
+        box-shadow: 0 6px 22px rgba(0, 0, 0, 0.06);
+      }
+      .timeline-boot-card {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        width: min(720px, 100%);
+        padding: 14px 16px;
+        border-radius: 12px;
+        background: rgba(255, 248, 224, 0.92);
+        border: 1px solid rgba(214, 173, 64, 0.22);
+      }
+      .timeline-boot-spinner {
+        width: 18px;
+        height: 18px;
+        border-radius: 999px;
+        border: 2px solid rgba(180, 130, 20, 0.20);
+        border-top-color: rgba(180, 130, 20, 0.90);
+        animation: timeline-spin 0.8s linear infinite;
+        flex: 0 0 auto;
+      }
+      .timeline-boot-title {
+        font-size: 13px;
+        font-weight: 700;
+        color: rgba(70, 52, 0, 0.92);
+      }
+      .timeline-boot-sub {
+        font-size: 12px;
+        color: rgba(90, 70, 10, 0.78);
+        margin-top: 2px;
+        line-height: 1.45;
+      }
+      @keyframes timeline-spin {
+        to { transform: rotate(360deg); }
+      }
+    </style>
+    <script type="module" crossorigin src="./assets/index-DkoXRJkg.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-C9MXYa2o.css">
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="timeline-boot-shell">
+        <div class="timeline-boot-card" aria-live="polite">
+          <div class="timeline-boot-spinner" aria-hidden="true"></div>
+          <div>
+            <div class="timeline-boot-title">React 드래그 편집기를 준비하는 중입니다…</div>
+            <div class="timeline-boot-sub">첫 진입 또는 편집 대상을 바꾼 직후에는 짧은 로딩이 있을 수 있습니다.</div>
+          </div>
+        </div>
+      </div>
+    </div>
   </body>
 </html>

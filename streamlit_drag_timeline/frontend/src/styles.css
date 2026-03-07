@@ -1,3 +1,4 @@
+
 :root {
   font-family: "Manrope", "Noto Sans KR", "Segoe UI", system-ui, -apple-system, sans-serif;
 }
@@ -33,6 +34,43 @@
   font-size: 13px;
   color: rgba(18, 24, 32, 0.64);
   margin-top: 2px;
+}
+
+.timeline-loading-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 4px 0 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 248, 224, 0.88);
+  border: 1px solid rgba(214, 173, 64, 0.22);
+}
+
+.timeline-loading-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: rgba(70, 52, 0, 0.92);
+}
+
+.timeline-loading-sub {
+  font-size: 12px;
+  color: rgba(90, 70, 10, 0.78);
+  margin-top: 2px;
+}
+
+.timeline-spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: 2px solid rgba(180, 130, 20, 0.20);
+  border-top-color: rgba(180, 130, 20, 0.90);
+  animation: timeline-spin 0.8s linear infinite;
+  flex: 0 0 auto;
+}
+
+@keyframes timeline-spin {
+  to { transform: rotate(360deg); }
 }
 
 .legend {

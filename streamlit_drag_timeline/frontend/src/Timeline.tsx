@@ -150,6 +150,7 @@ const Timeline: React.FC<TimelineProps> = ({
   const pendingDraftRef = useRef<DraftPatch | null>(null);
   const eventSeqRef = useRef(0);
   const [draft, setDraft] = useState<Record<number, Partial<EnrichedItem>>>({});
+  const [booting, setBooting] = useState(true);
 
   useEffect(() => {
     setDraft({});
@@ -163,6 +164,12 @@ const Timeline: React.FC<TimelineProps> = ({
       }
     };
   }, []);
+
+  useEffect(() => {
+    setBooting(true);
+    const id = window.setTimeout(() => setBooting(false), 250);
+    return () => window.clearTimeout(id);
+  }, [items.length]);
 
   const parsedItems = useMemo<EnrichedItem[]>(() => {
     return (items || []).map((raw) => ({
@@ -526,6 +533,15 @@ const Timeline: React.FC<TimelineProps> = ({
         </div>
         {legend}
       </div>
+      {booting && (
+        <div className="timeline-loading-banner" aria-live="polite">
+          <span className="timeline-spinner" />
+          <div>
+            <div className="timeline-loading-title">React 편집기를 준비하는 중입니다</div>
+            <div className="timeline-loading-sub">처음 1회 또는 데이터가 바뀐 직후에는 잠시 시간이 걸릴 수 있습니다.</div>
+          </div>
+        </div>
+      )}
       {renderTerminal("SND")}
       {renderTerminal("GAM")}
     </div>

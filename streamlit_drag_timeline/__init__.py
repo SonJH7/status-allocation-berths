@@ -15,7 +15,7 @@ _COMP_DIR = os.path.join(os.path.dirname(__file__), "frontend", "build")
 _drag_timeline = components.declare_component("drag_timeline", path=_COMP_DIR)
 
 
-def drag_timeline(items: t.Sequence[dict[str, t.Any]] | None = None) -> list[dict]:
+def drag_timeline(items: t.Sequence[dict[str, t.Any]] | None = None, key: str | None = None) -> t.Any:
     """
     Render the drag timeline component.
 
@@ -28,11 +28,11 @@ def drag_timeline(items: t.Sequence[dict[str, t.Any]] | None = None) -> list[dic
 
     Returns
     -------
-    list[dict]
-        Events emitted by the frontend in the form:
-        ``{"row_id": int, "dmin": int, "dy": float}``
+    Any
+        Events emitted by the frontend. The current payload is either a legacy
+        list of move dicts or ``{"event_id": str, "events": [...]}``.
     """
-    return _drag_timeline(items=items or [], default=[])
+    return _drag_timeline(items=items or [], default=[], key=key)
 
 
 __all__ = ["drag_timeline"]
