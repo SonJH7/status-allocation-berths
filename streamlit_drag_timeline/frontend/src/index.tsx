@@ -11,6 +11,16 @@ import "./styles.css";
 
 const StreamlitTimeline = withStreamlitConnection((props: ComponentProps) => {
   const items = (props.args?.items as any[]) || [];
+  const sentReadyRef = React.useRef(false);
+
+  React.useEffect(() => {
+    if (sentReadyRef.current) return;
+    sentReadyRef.current = true;
+    const id = window.setTimeout(() => {
+      Streamlit.setComponentValue({ kind: "ready", events: [] });
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, []);
 
   return (
     <Timeline

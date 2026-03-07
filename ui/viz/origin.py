@@ -292,7 +292,14 @@ def _build_drag_items(df: pd.DataFrame):
 
 
 def render_origin_view_drag(df_origin: pd.DataFrame):
-    """React drag&drop 타임라인 렌더링"""
+    """React drag&drop 타임라인 렌더링
+
+    Phase 1 안정화 포인트
+    - event_id 기준 1회 처리 보장
+    - dict payload / 구버전 list payload 모두 수용
+    - ready 핸드셰이크를 받아 초기 로딩 안내를 자연스럽게 종료
+    - 드롭 직후 편집버퍼를 source별 세션키에 즉시 반영
+    """
     _init_edit_buffers(df_origin)
     if "orig_df_snapshot" not in st.session_state or not st.session_state["orig_df_snapshot"].equals(df_origin):
         st.session_state["orig_df_snapshot"] = df_origin.copy()
@@ -300,24 +307,59 @@ def render_origin_view_drag(df_origin: pd.DataFrame):
         st.session_state["selected_row_id"] = None
 
     st.subheader("🚢 신항/감만 React 드래그 편집기")
-    st.caption("· 좌우 드래그: 5분 스냅 · 상하 드래그: 30m 스냅 · 드롭 시 한 번만 Streamlit 반영")
+    st.caption("· 좌우 드래그: 5분 스냅 · 상하 드래그: 30m 스냅 · 처음 1회 로딩 시 잠시 준비 시간이 있을 수 있습니다.")
 
     df_all = st.session_state.get("edit_df")
     if df_all is None or not isinstance(df_all, pd.DataFrame) or df_all.empty:
         st.info("편집할 데이터가 없습니다. 먼저 조회/불러오기를 실행하세요.")
         return
 
+    src = st.session_state.get("active_source", "crawl")
     items = _build_drag_items(df_all)
-    events = drag_timeline(items=items) or []
+    payload = drag_timeline(items=items, key=f"drag-timeline-{src}") or {}
 
-    if events:
-        src = st.session_state.get("active_source", "crawl")
+    payload_kind = None
+    # 하위호환: 과거 list payload를 그대로 보내는 버전도 수용
+    if isinstance(payload, list):
+        event_id = None
+        events = payload
+    elif isinstance(payload, dict):
+        payload_kind = payload.get("kind")
+        event_id = payload.get("event_id")
+        events = payload.get("events") or []
+    else:
+        event_id = None
+        events = []
+
+    ready_key = f"react_editor_ready_{src}"
+    if ready_key not in st.session_state:
+        st.session_state[ready_key] = False
+
+    if payload_kind == "ready":
+        if not st.session_state.get(ready_key, False):
+            st.session_state[ready_key] = True
+            st.rerun()
+        return
+
+    token_key = f"last_drag_event_token_{src}"
+    if token_key not in st.session_state:
+        st.session_state[token_key] = None
+
+    # event_id가 있는 새 payload만 1회 처리
+    should_apply = bool(events)
+    if event_id is not None:
+        should_apply = should_apply and (st.session_state[token_key] != event_id)
+
+    if should_apply:
+        applied_count = 0
         for ev in events:
             rid = ev.get("row_id")
             if rid is None:
                 continue
             dmin = int(ev.get("dmin") or 0)
             dy = float(ev.get("dy") or 0.0)
+            if dmin == 0 and abs(dy) < 1e-9:
+                continue
             st.session_state["edit_df"] = _apply_move(
                 st.session_state["edit_df"],
                 int(rid),
@@ -325,12 +367,21 @@ def render_origin_view_drag(df_origin: pd.DataFrame):
                 dy=dy,
             )
             st.session_state["selected_row_id"] = int(rid)
+            applied_count += 1
+
+        if event_id is not None:
+            st.session_state[token_key] = event_id
+
         # 편집 버퍼를 세트별 키에도 즉시 반영해 rerun 후에도 유지
-        if src == "crawl":
-            st.session_state["edit_df_crawl"] = st.session_state["edit_df"].copy()
-        else:
-            st.session_state["edit_df_upload"] = st.session_state["edit_df"].copy()
-        st.rerun()
+        if applied_count > 0:
+            if src == "crawl":
+                st.session_state["edit_df_crawl"] = st.session_state["edit_df"].copy()
+                st.session_state["edit_dirty_crawl"] = True
+            else:
+                st.session_state["edit_df_upload"] = st.session_state["edit_df"].copy()
+                st.session_state["edit_dirty_upload"] = True
+            st.rerun()
 
     # 검증은 계속 수행하지만 화면에는 경고를 표시하지 않음
     _ = validate_df(st.session_state["edit_df"])
+
