@@ -7,7 +7,15 @@ import streamlit as st
 from streamlit_plotly_events import plotly_events
 
 from ui.viz.common import period_str_kr, render_timeline_week
-from schema import MIN_CLEARANCE_M, snap_time_5min, snap_y_30m, validate_df
+from schema import (
+    MIN_CLEARANCE_M,
+    infer_berth_from_y,
+    row_center_y,
+    snap_time_5min,
+    snap_y_30m,
+    terminal_layout,
+    validate_df,
+)
 from streamlit_drag_timeline import drag_timeline
 
 
@@ -52,12 +60,18 @@ def _append_log(before, after):
             "row_id": before.get("row_id"),
             "vessel": before.get("vessel", ""),
             "voyage": before.get("voyage", ""),
-            "terminal": before.get("terminal", ""),
-            "berth": before.get("berth", ""),
+            "terminal_before": before.get("terminal", ""),
+            "berth_before": before.get("berth", ""),
+            "bp_before": before.get("bp"),
+            "y_m_before": before.get("y_m"),
             "start_before": before.get("start"),
             "end_before": before.get("end"),
             "f_before": before.get("f"),
             "e_before": before.get("e"),
+            "terminal_after": after.get("terminal", ""),
+            "berth_after": after.get("berth", ""),
+            "bp_after": after.get("bp"),
+            "y_m_after": after.get("y_m"),
             "start_after": after.get("start"),
             "end_after": after.get("end"),
             "f_after": after.get("f"),
@@ -76,6 +90,16 @@ def _is_finite_num(x) -> bool:
         return False
 
 
+def _safe_float(x, default=None):
+    try:
+        v = float(x)
+        if math.isnan(v) or math.isinf(v):
+            return default
+        return v
+    except Exception:
+        return default
+
+
 def _ts_equal(a, b) -> bool:
     if pd.isna(a) and pd.isna(b):
         return True
@@ -92,7 +116,40 @@ def _num_equal(a, b, eps=1e-6) -> bool:
     return abs(float(a) - float(b)) < eps
 
 
-def _apply_move(df: pd.DataFrame, row_id: int, dmin=0, dy=0.0) -> pd.DataFrame:
+def _current_mid_y(row: pd.Series) -> float:
+    mid = row_center_y(row)
+    return 0.0 if mid is None else float(mid)
+
+
+def _infer_terminal(default_terminal: str, target_terminal: str | None, target_berth=None) -> str:
+    t = str(target_terminal or default_terminal or "").upper().strip()
+    if t in {"SND", "GAM"}:
+        return t
+    if target_berth is not None:
+        try:
+            b = int(target_berth)
+        except Exception:
+            b = None
+        if b is not None:
+            if 1 <= b <= 5:
+                return "SND"
+            if 6 <= b <= 9:
+                return "GAM"
+    return str(default_terminal or "").upper().strip()
+
+
+def _apply_move(
+    df: pd.DataFrame,
+    row_id: int,
+    dmin=0,
+    dy=0.0,
+    *,
+    target_terminal: str | None = None,
+    target_berth=None,
+    target_y_m=None,
+    target_f=None,
+    target_e=None,
+) -> pd.DataFrame:
     out = df.copy()
     idx_arr = out.index[out["row_id"] == row_id]
     if len(idx_arr) == 0:
@@ -103,32 +160,72 @@ def _apply_move(df: pd.DataFrame, row_id: int, dmin=0, dy=0.0) -> pd.DataFrame:
     # 기존 값
     s0, e0 = row.get("start"), row.get("end")
     f0, e1 = row.get("f"), row.get("e")
+    b0 = row.get("berth")
+    t0 = row.get("terminal")
+    y0 = row.get("y_m")
+    bp0 = row.get("bp")
 
-    # 정보 복제(기존값)
+    # 후보 값(초기엔 기존값)
     s1, e2 = s0, e0
     f1, e3 = f0, e1
+    b1, t1, y1, bp1 = b0, t0, y0, bp0
 
     changed = False
 
-    # 시간 이동 (start/end가 유효한 경우에만)
+    # 시간 이동
     if dmin != 0 and (pd.notna(s0) and pd.notna(e0)):
         s1 = snap_time_5min(pd.to_datetime(s0) + pd.Timedelta(minutes=dmin))
         e2 = snap_time_5min(pd.to_datetime(e0) + pd.Timedelta(minutes=dmin))
         if (not _ts_equal(s0, s1)) or (not _ts_equal(e0, e2)):
             changed = True
 
-    # 세로 이동 (f/e가 유효한 경우에만)
-    if dy != 0 and _is_finite_num(f0) and _is_finite_num(e1):
-        L = float(e1) - float(f0)
-        if _is_finite_num(L) and abs(L) > 0:
-            mid = (float(f0) + float(e1)) / 2.0
-            new_mid = snap_y_30m(mid + float(dy))
-            f1 = new_mid - abs(L) / 2.0
-            e3 = new_mid + abs(L) / 2.0
-            if (not _num_equal(f0, f1)) or (not _num_equal(e1, e3)):
+    # 위치 이동: berth 자유 이동 허용(현재 terminal 내부)
+    spatial_requested = (
+        dy != 0
+        or target_terminal is not None
+        or target_berth is not None
+        or target_y_m is not None
+        or target_f is not None
+        or target_e is not None
+    )
+    if spatial_requested:
+        current_mid = _current_mid_y(row)
+        current_len = abs(_safe_float(e1, 0.0) - _safe_float(f0, 0.0))
+        if current_len <= 0:
+            current_len = 10.0
+
+        t1 = _infer_terminal(str(t0 or ""), target_terminal, target_berth)
+        layout = terminal_layout(t1) or terminal_layout(t0)
+        if layout:
+            y_max = float(layout["y_max"])
+            min_mid = current_len / 2.0
+            max_mid = max(min_mid, y_max - current_len / 2.0)
+
+            if _is_finite_num(target_f) and _is_finite_num(target_e):
+                raw_mid = (_safe_float(target_f, 0.0) + _safe_float(target_e, 0.0)) / 2.0
+            elif _is_finite_num(target_y_m):
+                raw_mid = _safe_float(target_y_m, current_mid)
+            else:
+                raw_mid = current_mid + float(dy)
+
+            new_mid = snap_y_30m(min(max(raw_mid, min_mid), max_mid))
+            f1 = new_mid - current_len / 2.0
+            e3 = new_mid + current_len / 2.0
+            y1 = new_mid
+            bp1 = int(round(new_mid))
+            inferred = infer_berth_from_y(t1, new_mid)
+            b1 = int(target_berth) if target_berth is not None else (inferred if inferred is not None else b0)
+
+            if (
+                (not _num_equal(f0, f1))
+                or (not _num_equal(e1, e3))
+                or (not _num_equal(y0, y1))
+                or (not _num_equal(bp0, bp1))
+                or str(t0 or "") != str(t1 or "")
+                or int(b0) != int(b1)
+            ):
                 changed = True
 
-    # 실제 변경 없으면 그대로 반환(로그 없음)
     if not changed:
         return out
 
@@ -137,9 +234,13 @@ def _apply_move(df: pd.DataFrame, row_id: int, dmin=0, dy=0.0) -> pd.DataFrame:
     out.at[idx, "end"] = e2
     out.at[idx, "f"] = f1
     out.at[idx, "e"] = e3
+    out.at[idx, "terminal"] = t1
+    out.at[idx, "berth"] = b1
+    out.at[idx, "y_m"] = y1
+    out.at[idx, "bp"] = bp1
     after = dict(out.loc[idx])
 
-    _append_log(before, after)  # 실제 바뀐 경우만
+    _append_log(before, after)
     st.session_state["undo_df"] = df.copy()
     return out
 
@@ -149,17 +250,16 @@ def render_origin_view(df_origin: pd.DataFrame):
     """
     - 중앙 라벨 클릭으로 선택
     - Shift+클릭: 선택된 막대를 해당 좌표로 이동(드래그 대신)
-    - 변경은 st.session_state['edit_df']에 반영, 로그는 st.session_state['edit_logs']
+    - berth는 y축 위치 기준으로 자동 갱신됩니다.
     """
     _init_edit_buffers(df_origin)
 
-    # 입력 데이터가 새로 들어온 경우에만 편집 버퍼를 갱신하여 UnboundLocalError 방지
     if "orig_df_snapshot" not in st.session_state or not st.session_state["orig_df_snapshot"].equals(df_origin):
         st.session_state["orig_df_snapshot"] = df_origin.copy()
         st.session_state["edit_df"] = df_origin.copy()
         st.session_state["selected_row_id"] = None
     st.subheader("🖱️ 편집 가능한 타임라인(SND / GAM)")
-    st.caption("· 클릭: 선택  · Shift+클릭: 지정 위치로 이동(드롭)  · 스냅: 5분/30m")
+    st.caption("· 클릭: 선택  · Shift+클릭: 지정 위치로 이동(드롭)  · 스냅: 5분/30m · 선석은 위치에 맞춰 자동 갱신")
 
     tab_snd, tab_gam = st.tabs(["신항 SND", "감만 GAM"])
 
@@ -174,7 +274,6 @@ def render_origin_view(df_origin: pd.DataFrame):
             st.info(f"{terminal} 데이터가 없습니다.")
             return
 
-        # 그림 생성
         fig, (x0, x1) = render_timeline_week(df_t, terminal=terminal, title="")
         fig.update_layout(title=f"{terminal} · {period_str_kr(x0, x1)}", width=2400, height=600)
 
@@ -207,7 +306,7 @@ def render_origin_view(df_origin: pd.DataFrame):
             if shift_pressed and row_id is not None and target_event.get("x") is not None:
                 rid = int(row_id)
                 df_current = st.session_state["edit_df"]
-                idx_arr = df_current.index[(df_current["row_id"] == rid) & (df_current["terminal"] == terminal)]
+                idx_arr = df_current.index[df_current["row_id"] == rid]
                 if len(idx_arr):
                     idx = idx_arr[0]
                     s = pd.to_datetime(df_current.loc[idx, "start"])
@@ -222,26 +321,16 @@ def render_origin_view(df_origin: pd.DataFrame):
                         if new_x is not None:
                             diff_min = (new_x - mid_old).total_seconds() / 60.0
                             dmin = int(round(diff_min / 5.0) * 5)
-
-                            f0 = df_current.loc[idx, "f"]
-                            e0 = df_current.loc[idx, "e"]
-                            dy = 0.0
                             y_val = target_event.get("y")
-                            try:
-                                if _is_finite_num(f0) and _is_finite_num(e0) and y_val is not None:
-                                    mid_y_old = (float(f0) + float(e0)) / 2.0
-                                    dy = float(y_val) - mid_y_old
-                            except Exception:
-                                dy = 0.0
                             st.session_state["edit_df"] = _apply_move(
-                                st.session_state["edit_df"], rid, dmin=dmin, dy=dy
+                                st.session_state["edit_df"],
+                                rid,
+                                dmin=dmin,
+                                target_terminal=terminal,
+                                target_y_m=y_val,
                             )
 
-        # 간단 검증은 계속 수행하되 화면 노출은 생략
         _ = validate_df(st.session_state["edit_df"])
-
-        # 선택 정보도 상태만 유지하고 화면에는 노출하지 않음
-        _ = st.session_state.get("selected_row_id")
 
     with tab_snd:
         _render_one("SND")
@@ -261,15 +350,6 @@ def _to_iso_ts(value):
 
 
 def _build_drag_items(df: pd.DataFrame):
-    def _safe_num(x):
-        try:
-            v = float(x)
-            if math.isnan(v) or math.isinf(v):
-                return None
-            return v
-        except Exception:
-            return None
-
     items = []
     for row in df.itertuples(index=False):
         items.append(
@@ -281,8 +361,9 @@ def _build_drag_items(df: pd.DataFrame):
                 "berth": getattr(row, "berth", None),
                 "start": _to_iso_ts(getattr(row, "start", None)),
                 "end": _to_iso_ts(getattr(row, "end", None)),
-                "f": _safe_num(getattr(row, "f", None)),
-                "e": _safe_num(getattr(row, "e", None)),
+                "f": _safe_float(getattr(row, "f", None)),
+                "e": _safe_float(getattr(row, "e", None)),
+                "y_m": _safe_float(getattr(row, "y_m", None)),
                 "note": getattr(row, "note", "") or "",
                 "plan_status": getattr(row, "plan_status", "") or "",
                 "pilot": getattr(row, "pilot", "") or "",
@@ -292,14 +373,7 @@ def _build_drag_items(df: pd.DataFrame):
 
 
 def render_origin_view_drag(df_origin: pd.DataFrame):
-    """React drag&drop 타임라인 렌더링
-
-    Phase 1 안정화 포인트
-    - event_id 기준 1회 처리 보장
-    - dict payload / 구버전 list payload 모두 수용
-    - ready 핸드셰이크를 받아 초기 로딩 안내를 자연스럽게 종료
-    - 드롭 직후 편집버퍼를 source별 세션키에 즉시 반영
-    """
+    """React drag&drop 타임라인 렌더링 (선석 자유 이동 허용)"""
     _init_edit_buffers(df_origin)
     if "orig_df_snapshot" not in st.session_state or not st.session_state["orig_df_snapshot"].equals(df_origin):
         st.session_state["orig_df_snapshot"] = df_origin.copy()
@@ -307,81 +381,63 @@ def render_origin_view_drag(df_origin: pd.DataFrame):
         st.session_state["selected_row_id"] = None
 
     st.subheader("🚢 신항/감만 React 드래그 편집기")
-    st.caption("· 좌우 드래그: 5분 스냅 · 상하 드래그: 30m 스냅 · 처음 1회 로딩 시 잠시 준비 시간이 있을 수 있습니다.")
+    st.caption("· 좌우 드래그: 5분 스냅 · 상하 드래그: 30m 스냅 · 선석은 y축 위치에 맞춰 자동 변경 · 드롭 시 한 번만 Streamlit 반영")
 
     df_all = st.session_state.get("edit_df")
     if df_all is None or not isinstance(df_all, pd.DataFrame) or df_all.empty:
         st.info("편집할 데이터가 없습니다. 먼저 조회/불러오기를 실행하세요.")
         return
 
-    src = st.session_state.get("active_source", "crawl")
     items = _build_drag_items(df_all)
-    payload = drag_timeline(items=items, key=f"drag-timeline-{src}") or {}
+    payload = drag_timeline(items=items) or {}
 
-    payload_kind = None
-    # 하위호환: 과거 list payload를 그대로 보내는 버전도 수용
+    # legacy compatibility
     if isinstance(payload, list):
-        event_id = None
-        events = payload
-    elif isinstance(payload, dict):
-        payload_kind = payload.get("kind")
-        event_id = payload.get("event_id")
-        events = payload.get("events") or []
-    else:
-        event_id = None
+        payload = {"event_id": None, "events": payload}
+
+    src = st.session_state.get("active_source", "crawl")
+    token_key = f"last_drag_event_token_{src}"
+    st.session_state.setdefault(token_key, None)
+
+    event_id = payload.get("event_id") if isinstance(payload, dict) else None
+    events = payload.get("events", []) if isinstance(payload, dict) else []
+
+    if event_id is not None and st.session_state.get(token_key) == event_id:
         events = []
 
-    ready_key = f"react_editor_ready_{src}"
-    if ready_key not in st.session_state:
-        st.session_state[ready_key] = False
-
-    if payload_kind == "ready":
-        if not st.session_state.get(ready_key, False):
-            st.session_state[ready_key] = True
-            st.rerun()
-        return
-
-    token_key = f"last_drag_event_token_{src}"
-    if token_key not in st.session_state:
-        st.session_state[token_key] = None
-
-    # event_id가 있는 새 payload만 1회 처리
-    should_apply = bool(events)
-    if event_id is not None:
-        should_apply = should_apply and (st.session_state[token_key] != event_id)
-
-    if should_apply:
-        applied_count = 0
+    if events:
+        if event_id is not None:
+            st.session_state[token_key] = event_id
         for ev in events:
             rid = ev.get("row_id")
             if rid is None:
                 continue
-            dmin = int(ev.get("dmin") or 0)
-            dy = float(ev.get("dy") or 0.0)
-            if dmin == 0 and abs(dy) < 1e-9:
-                continue
             st.session_state["edit_df"] = _apply_move(
                 st.session_state["edit_df"],
                 int(rid),
-                dmin=dmin,
-                dy=dy,
+                dmin=int(ev.get("dmin") or 0),
+                dy=float(ev.get("dy") or 0.0),
+                target_terminal=ev.get("target_terminal"),
+                target_berth=ev.get("target_berth"),
+                target_y_m=ev.get("target_y_m"),
+                target_f=ev.get("target_f"),
+                target_e=ev.get("target_e"),
             )
             st.session_state["selected_row_id"] = int(rid)
-            applied_count += 1
 
-        if event_id is not None:
-            st.session_state[token_key] = event_id
+        # source별 편집 상태/undo/log를 즉시 저장해야 rerun 이후에도 유지됨
+        if src == "crawl":
+            st.session_state["edit_df_crawl"] = st.session_state["edit_df"].copy()
+            st.session_state["undo_df_crawl"] = (
+                None if st.session_state.get("undo_df") is None else st.session_state["undo_df"].copy()
+            )
+            st.session_state["logs_crawl"] = list(st.session_state.get("edit_logs", []))
+        else:
+            st.session_state["edit_df_upload"] = st.session_state["edit_df"].copy()
+            st.session_state["undo_df_upload"] = (
+                None if st.session_state.get("undo_df") is None else st.session_state["undo_df"].copy()
+            )
+            st.session_state["logs_upload"] = list(st.session_state.get("edit_logs", []))
+        st.rerun()
 
-        # 편집 버퍼를 세트별 키에도 즉시 반영해 rerun 후에도 유지
-        if applied_count > 0:
-            if src == "crawl":
-                st.session_state["edit_df_crawl"] = st.session_state["edit_df"].copy()
-                st.session_state["edit_dirty_crawl"] = True
-            else:
-                st.session_state["edit_df_upload"] = st.session_state["edit_df"].copy()
-                st.session_state["edit_dirty_upload"] = True
-            st.rerun()
-
-    # 검증은 계속 수행하지만 화면에는 경고를 표시하지 않음
     _ = validate_df(st.session_state["edit_df"])
-

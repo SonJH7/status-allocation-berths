@@ -2,7 +2,10 @@
 # ui/sidebar.py
 # =========================
 import streamlit as st
+import pandas as pd
 from datetime import date, timedelta
+
+from schema import sync_raw_with_norm
 
 
 PERIOD_OPTIONS = {
@@ -204,6 +207,35 @@ def _render_jump_link(label: str, target_id: str):
     )
 
 
+def _to_csv_bytes(df: pd.DataFrame) -> bytes:
+    if df is None or getattr(df, "empty", True):
+        return b""
+    out = df.copy()
+    for col in out.columns:
+        if pd.api.types.is_datetime64_any_dtype(out[col]):
+            out[col] = out[col].dt.strftime("%Y-%m-%d %H:%M")
+    return out.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+
+
+def _build_edit_export_frames(source: str):
+    edit_df = st.session_state.get(f"edit_df_{source}")
+    raw_df = st.session_state.get(f"{source}_raw")
+
+    if edit_df is None or getattr(edit_df, "empty", True):
+        return None, None
+
+    norm_export = edit_df.copy()
+    raw_export = None
+
+    if raw_df is not None and not getattr(raw_df, "empty", True) and "row_id" in raw_df.columns and "row_id" in edit_df.columns:
+        try:
+            raw_export = sync_raw_with_norm(raw_df.copy(), edit_df.copy())
+        except Exception:
+            raw_export = None
+
+    return raw_export, norm_export
+
+
 # ---------------------------------------------------------
 # 사이드바 레이아웃
 # ---------------------------------------------------------
@@ -387,13 +419,37 @@ def build_sidebar():
                 )
                 active_source = "crawl" if src_label == "크롤링" else "upload"
                 st.session_state["active_source"] = active_source
-
+            
             use_react_drag = st.toggle(
                 "React 드래그 편집기 사용",
                 value=False,
                 disabled=not feature_edit,
                 help="Plotly 그래프 대신 React 타임라인을 사용합니다. 드래그 후 [저장]을 눌러야 원본 테이블에 반영됩니다.",
             )
+
+            st.caption("현재 편집 중인 결과 전체를 CSV로 내려받을 수 있습니다. 저장 버튼을 누르지 않아도 현재 편집 버퍼 기준으로 내보냅니다.")
+            raw_export_df, norm_export_df = _build_edit_export_frames(active_source)
+            dl1, dl2 = st.columns(2)
+            with dl1:
+                st.download_button(
+                    "변경본 CSV",
+                    data=_to_csv_bytes(raw_export_df if raw_export_df is not None else norm_export_df),
+                    file_name=f"{active_source}_edited_full.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    disabled=(raw_export_df is None and (norm_export_df is None or norm_export_df.empty)),
+                    help="원본 컬럼 구조를 유지할 수 있으면 그 형태로, 아니면 정규화 컬럼 형태로 전체 편집본을 다운로드합니다.",
+                )
+            with dl2:
+                st.download_button(
+                    "정규화 CSV",
+                    data=_to_csv_bytes(norm_export_df),
+                    file_name=f"{active_source}_edited_normalized.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    disabled=(norm_export_df is None or norm_export_df.empty),
+                    help="정규화 스키마(terminal, berth, vessel, start, end, f, e 등) 기준의 전체 편집본을 다운로드합니다.",
+                )
 
         # ---------------------------------------------------------
         # 5) Compare
