@@ -1,4 +1,4 @@
-﻿# app.py 부산항 부두배정 현황 · 데이터/크롤러 병행 · 편집/시각화
+# app.py 부산항 부두배정 현황 · 데이터/크롤러 병행 · 편집/시각화
 # -----------------------------------------------------------------------------
 # 핵심 요약
 # - 두 데이터 세트(크롤러, 업로드)를 나란히 관리하고 비교(표: 위/아래, 그래프: 좌/우).
@@ -15,6 +15,7 @@ import pandas as pd
 
 from crawler import collect_berth_info
 from schema import normalize_df, ensure_row_id, sync_raw_with_norm
+from classical_pipeline import SolverConfig, run_classical_pipeline
 from ui.sidebar import build_sidebar
 from ui.validation import show_validation
 from ui.table import show_table
@@ -91,6 +92,7 @@ def _init_all_session_keys():
         "react_editor_boot_started_at_upload": 0.0,
         "react_editor_boot_notice_until_crawl": 0.0,
         "react_editor_boot_notice_until_upload": 0.0,
+        "classical_meta": {},
     }
     for k, v in defaults.items():
         _ensure_ss(k, v)
@@ -154,8 +156,12 @@ def _process_pending_action():
             if bool(action.get("use_react_drag")):
                 _arm_react_boot(action.get("active_source", "crawl"), notice_seconds=1.5)
             return
+
+        if kind == "classical":
+            handle_classical_run(action.get("classical_config") or {})
+            return
     except Exception as e:
-        label = {"crawl": "조회", "load": "불러오기", "viz": "시각화"}.get(kind, "작업")
+        label = {"crawl": "조회", "load": "불러오기", "viz": "시각화", "classical": "Classical 최적화"}.get(kind, "작업")
         st.error(f"{label} 중 오류가 발생했습니다: {e}")
 
 
@@ -336,6 +342,54 @@ def handle_file_load(upload_file=None, upload_name: str | None = None, upload_by
         "업로드 파일을 읽고 정규화하는 중입니다...",
         _work,
         caption="잠시만 기다려 주세요. 불러오기가 끝나면 비교에 바로 사용할 수 있습니다.",
+        min_ms=350,
+    )
+
+
+def handle_classical_run(classical_config: dict):
+    """
+    [Classical 최적화 실행] 버튼 클릭 시 호출됩니다.
+    - 현재 crawl_df를 입력으로 Gurobi 기반 rolling-horizon 최적화를 수행
+    - 결과를 기존 시각화 스키마(df)로 변환해 crawl 세트에 반영
+    """
+    src_df = st.session_state.get("crawl_df", pd.DataFrame())
+    if src_df.empty:
+        raise ValueError("클래식 최적화 대상(crawl_df)이 없습니다. 먼저 조회를 실행하세요.")
+
+    cfg = SolverConfig(
+        slot_minutes=int(classical_config.get("slot_minutes", 60)),
+        window_size=int(classical_config.get("window_size", 24)),
+        overlap=int(classical_config.get("overlap", 8)),
+        time_limit_sec=int(classical_config.get("time_limit_sec", 100)),
+        default_vessel_length=int(classical_config.get("default_vessel_length", 150)),
+        use_qcap=bool(classical_config.get("use_qcap", True)),
+    )
+
+    def _work():
+        optimized_df, meta = run_classical_pipeline(src_df, cfg)
+        optimized_df = ensure_row_id(normalize_df(optimized_df))
+
+        st.session_state["crawl_df"] = optimized_df.copy()
+        st.session_state["edit_df_crawl"] = optimized_df.copy()
+        st.session_state["snapshot_crawl"] = optimized_df.copy()
+        st.session_state["undo_df_crawl"] = None
+        st.session_state["logs_crawl"] = []
+        st.session_state["edit_dirty_crawl"] = False
+        st.session_state["classical_meta"] = meta
+
+        st.session_state["active_source"] = "crawl"
+        st.session_state["show_viz"] = True
+        st.session_state["pending_viz_loading"] = True
+        st.session_state["pending_viz_loading_until"] = time.perf_counter() + 0.35
+        st.success(
+            f"Classical 최적화 완료: 입력 {meta.get('n_in', 0)}건 / 결과 {meta.get('n_out', 0)}건 "
+            f"({meta.get('status', '-')})"
+        )
+
+    _run_with_min_feedback(
+        "Classical(Gurobi) 최적화를 실행하는 중입니다...",
+        _work,
+        caption="모델 크기에 따라 시간이 걸릴 수 있습니다.",
         min_ms=350,
     )
 
@@ -985,6 +1039,8 @@ def main():
     6) 원본 테이블(좌/우 비교) 렌더
     """
     _init_all_session_keys()
+    _show_pending_toast()
+    _process_pending_action()
     ctrl = build_sidebar()
 
     if ctrl.get("run_crawl"):
@@ -1008,6 +1064,12 @@ def main():
             use_react_drag=bool(ctrl.get("use_react_drag", False)),
         )
 
+    if ctrl.get("run_classical"):
+        _queue_pending_action(
+            "classical",
+            classical_config=ctrl.get("classical_config", {}),
+        )
+
     prev_use_react_drag = bool(st.session_state.get("prev_use_react_drag", False))
     prev_active_source_for_react = st.session_state.get("prev_active_source_for_react", "crawl")
     current_use_react_drag = bool(ctrl.get("use_react_drag", False))
@@ -1018,9 +1080,6 @@ def main():
     st.session_state["prev_use_react_drag"] = current_use_react_drag
     st.session_state["prev_active_source_for_react"] = current_active_source
 
-    _show_pending_toast()
-    _process_pending_action()
-
     # A) 조회/불러오기
     # 버튼 클릭은 pending_action으로 큐잉되어 여기서는 이미 처리된 상태입니다.
 
@@ -1029,6 +1088,13 @@ def main():
 
     if st.session_state.get("crawl_filter_summary"):
         st.info(f"현재 조회 조건 · {st.session_state['crawl_filter_summary']}")
+    if st.session_state.get("classical_meta"):
+        meta = st.session_state["classical_meta"]
+        st.caption(
+            "Classical 결과 · "
+            f"status={meta.get('status', '-')} · "
+            f"in={meta.get('n_in', 0)} · out={meta.get('n_out', 0)}"
+        )
     st.caption(f"연구 기능 상태 · {_format_feature_summary(ctrl)}")
 
     dirty_src = ctrl["active_source"]
