@@ -1,4 +1,4 @@
-﻿# =========================
+# =========================
 # ui/sidebar.py
 # =========================
 import streamlit as st
@@ -386,9 +386,37 @@ def build_sidebar():
         # ---------------------------------------------------------
         st.divider()
         _anchor("sb-feature-classical")
+        has_crawl_for_classical = bool(
+            st.session_state.get("crawl_df") is not None
+            and not getattr(st.session_state.get("crawl_df"), "empty", True)
+        )
         with st.expander("3) Classical-based BAP & QCAP", expanded=False):
-            st.info("준비중입니다. 다음 단계에서 고전적 BAP/QCAP baseline 패널을 여기에 연결합니다.")
-            st.caption("예정: 휴리스틱/최적화 baseline 실행, objective/feasibility/runtime 비교")
+            st.caption("크롤링 결과를 입력으로 받아 Gurobi 기반 Classical BAP/QCAP 파이프라인을 실행합니다.")
+            slot_minutes = st.selectbox("시간 슬롯(분)", options=[30, 60], index=1)
+            window_size = st.number_input("Rolling window 크기(슬롯)", min_value=4, max_value=96, value=24, step=1)
+            overlap = st.number_input("Window overlap(슬롯)", min_value=0, max_value=48, value=8, step=1)
+            time_limit_sec = st.number_input("윈도우당 Time limit(초)", min_value=5, max_value=600, value=100, step=5)
+            default_vessel_length = st.number_input("기본 선박 길이(m)", min_value=50, max_value=400, value=150, step=5)
+            use_qcap = st.toggle("QCAP 제약 활성화(무거움)", value=True)
+            st.caption("QCAP를 켜면 크레인 제약까지 포함되어 계산 시간이 크게 늘어날 수 있습니다.")
+
+            run_classical = st.button(
+                "Classical 최적화 실행",
+                use_container_width=True,
+                disabled=not has_crawl_for_classical,
+                type="primary",
+            )
+            if not has_crawl_for_classical:
+                st.info("먼저 1) Selectable Period Search에서 조회하기를 실행해 주세요.")
+
+        classical_config = {
+            "slot_minutes": int(slot_minutes),
+            "window_size": int(window_size),
+            "overlap": int(overlap),
+            "time_limit_sec": int(time_limit_sec),
+            "default_vessel_length": int(default_vessel_length),
+            "use_qcap": bool(use_qcap),
+        }
 
         # ---------------------------------------------------------
         # 4) Edit
@@ -517,4 +545,6 @@ def build_sidebar():
         "feature_classical": feature_classical,
         "feature_edit": feature_edit,
         "feature_compare": feature_compare,
+        "run_classical": run_classical,
+        "classical_config": classical_config,
     }
