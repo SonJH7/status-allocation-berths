@@ -11,12 +11,23 @@ type RawItem = {
   end?: string;
   f?: number;
   e?: number;
+  y_m?: number;
   note?: string;
   plan_status?: string;
   pilot?: string;
 };
 
-type MoveEvent = { row_id: number; dmin: number; dy: number };
+type MoveEvent = {
+  row_id: number;
+  dmin: number;
+  dy: number;
+  target_terminal: string;
+  target_berth: number;
+  target_y_m: number;
+  target_f: number;
+  target_e: number;
+};
+
 type EventPayload = { event_id: string; events: MoveEvent[] };
 
 type EnrichedItem = RawItem & {
@@ -24,6 +35,7 @@ type EnrichedItem = RawItem & {
   endDate: Date | null;
   f: number;
   e: number;
+  y_m: number;
 };
 
 type TerminalKey = "SND" | "GAM";
@@ -46,16 +58,35 @@ type DragState = {
   baseEnd: number;
   baseF: number;
   baseE: number;
+  baseY: number;
 };
 
 type DraftPatch = { rowId: number; patch: Partial<EnrichedItem> | null };
 
 const TERMINAL_META: Record<
   TerminalKey,
-  { label: string; yMax: number; berthStep: number; berths: number[] }
+  {
+    label: string;
+    yMax: number;
+    berthStep: number;
+    berths: number[];
+    bandLabels: string[];
+  }
 > = {
-  SND: { label: "신항 SND", yMax: 1500, berthStep: 300, berths: [1, 2, 3, 4, 5] },
-  GAM: { label: "감만 GAM", yMax: 1400, berthStep: 350, berths: [6, 7, 8, 9] },
+  SND: {
+    label: "신항 SND",
+    yMax: 1500,
+    berthStep: 300,
+    berths: [1, 2, 3, 4, 5],
+    bandLabels: ["1", "2", "3", "4", "5"],
+  },
+  GAM: {
+    label: "감만 GAM",
+    yMax: 1400,
+    berthStep: 350,
+    berths: [9, 8, 7, 6],
+    bandLabels: ["1(9)", "2(8)", "3(7)", "4(6)"],
+  },
 };
 
 const STATUS_COLORS: Record<string, string> = {
@@ -131,10 +162,19 @@ const tickLabels = (startMs: number, endMs: number) => {
   for (let t = startAligned; t <= endMs + sixHours; t += sixHours) {
     const d = new Date(t);
     const isMidnight = d.getHours() === 0;
-    const text = isMidnight ? `${d.getMonth() + 1}/${d.getDate()}` : `${String(d.getHours()).padStart(2, "0")}h`;
+    const text = isMidnight
+      ? `${d.getMonth() + 1}/${d.getDate()}`
+      : `${String(d.getHours()).padStart(2, "0")}h`;
     labels.push({ x: t, text });
   }
   return labels;
+};
+
+const inferBerth = (terminal: TerminalKey, yMid: number) => {
+  const meta = TERMINAL_META[terminal];
+  const clamped = clamp(yMid, 0, meta.yMax - 0.0001);
+  const idx = clamp(Math.floor(clamped / meta.berthStep), 0, meta.berths.length - 1);
+  return meta.berths[idx];
 };
 
 const Timeline: React.FC<TimelineProps> = ({
@@ -150,7 +190,6 @@ const Timeline: React.FC<TimelineProps> = ({
   const pendingDraftRef = useRef<DraftPatch | null>(null);
   const eventSeqRef = useRef(0);
   const [draft, setDraft] = useState<Record<number, Partial<EnrichedItem>>>({});
-  const [booting, setBooting] = useState(true);
 
   useEffect(() => {
     setDraft({});
@@ -165,20 +204,20 @@ const Timeline: React.FC<TimelineProps> = ({
     };
   }, []);
 
-  useEffect(() => {
-    setBooting(true);
-    const id = window.setTimeout(() => setBooting(false), 250);
-    return () => window.clearTimeout(id);
-  }, [items.length]);
-
   const parsedItems = useMemo<EnrichedItem[]>(() => {
-    return (items || []).map((raw) => ({
-      ...raw,
-      startDate: parseDate(raw.start),
-      endDate: parseDate(raw.end),
-      f: Number(raw.f ?? 0),
-      e: Number(raw.e ?? 0),
-    }));
+    return (items || []).map((raw) => {
+      const f = Number(raw.f ?? 0);
+      const e = Number(raw.e ?? 0);
+      const yMid = Number.isFinite(Number(raw.y_m)) ? Number(raw.y_m) : (f + e) / 2;
+      return {
+        ...raw,
+        startDate: parseDate(raw.start),
+        endDate: parseDate(raw.end),
+        f,
+        e,
+        y_m: yMid,
+      };
+    });
   }, [items]);
 
   const committedRange = useMemo(() => computeRange(parsedItems), [parsedItems]);
@@ -190,12 +229,10 @@ const Timeline: React.FC<TimelineProps> = ({
   }, [parsedItems, draft]);
 
   const margin = { left: 84, right: 48, top: 18, bottom: 28 };
-  const [x0, x1] = committedRange; // 드래그 중에는 draft에 따라 range를 재계산하지 않음
+  const [x0, x1] = committedRange;
   const hoursRange = Math.max(1, (x1 - x0) / (60 * 60 * 1000));
   const minInnerWidth =
-    typeof frameWidth === "number"
-      ? Math.max(960, frameWidth - margin.left - margin.right)
-      : 1200;
+    typeof frameWidth === "number" ? Math.max(960, frameWidth - margin.left - margin.right) : 1200;
   const innerWidth = Math.max(minInnerWidth, Math.round(hoursRange * 14), 1200);
   const svgWidth = innerWidth + margin.left + margin.right;
   const pxPerMs = innerWidth / (x1 - x0);
@@ -256,15 +293,26 @@ const Timeline: React.FC<TimelineProps> = ({
       }
 
       const length = Math.abs(state.baseE - state.baseF);
-      const mid = (state.baseE + state.baseF) / 2;
-      const newMid = clamp(mid + dyMeters, length / 2, meta.yMax - length / 2);
+      const minMid = length / 2;
+      const maxMid = Math.max(minMid, meta.yMax - length / 2);
+      const rawMid = state.baseY + dyMeters;
+      const newMid = snapMeters(clamp(rawMid, minMid, maxMid));
       const newF = newMid - length / 2;
       const newE = newMid + length / 2;
+      const targetBerth = inferBerth(terminal, newMid);
 
       const newStart = new Date(state.baseStart + dmin * 60 * 1000);
       const newEnd = new Date(state.baseEnd + dmin * 60 * 1000);
 
-      scheduleDraft(state.rowId, { startDate: newStart, endDate: newEnd, f: newF, e: newE });
+      scheduleDraft(state.rowId, {
+        startDate: newStart,
+        endDate: newEnd,
+        f: newF,
+        e: newE,
+        y_m: newMid,
+        berth: targetBerth,
+        terminal,
+      });
     };
 
     const onDragEnd = (evt: PointerEvent, state: DragState) => {
@@ -273,16 +321,41 @@ const Timeline: React.FC<TimelineProps> = ({
       const dmin = snapMinutes(dx / pxPerMin);
       const dyMeters = snapMeters(dyPx / pxPerMeter);
 
-      scheduleDraft(state.rowId, null);
+      const length = Math.abs(state.baseE - state.baseF);
+      const minMid = length / 2;
+      const maxMid = Math.max(minMid, meta.yMax - length / 2);
+      const rawMid = state.baseY + dyMeters;
+      const newMid = snapMeters(clamp(rawMid, minMid, maxMid));
+      const newF = newMid - length / 2;
+      const newE = newMid + length / 2;
+      const targetBerth = inferBerth(terminal, newMid);
+
+      setDraft((prev) => {
+        const next = { ...prev };
+        delete next[state.rowId];
+        return next;
+      });
       dragRef.current = null;
 
-      if (!onEvents || (dmin === 0 && dyMeters === 0)) {
-        return;
-      }
+      if (!onEvents) return;
+      if (dmin === 0 && dyMeters === 0) return;
 
       eventSeqRef.current += 1;
-      const event_id = `${state.rowId}-${Date.now()}-${eventSeqRef.current}`;
-      onEvents({ event_id, events: [{ row_id: state.rowId, dmin, dy: dyMeters }] });
+      onEvents({
+        event_id: `${Date.now()}-${state.rowId}-${eventSeqRef.current}`,
+        events: [
+          {
+            row_id: state.rowId,
+            dmin,
+            dy: dyMeters,
+            target_terminal: terminal,
+            target_berth: targetBerth,
+            target_y_m: newMid,
+            target_f: newF,
+            target_e: newE,
+          },
+        ],
+      });
     };
 
     const onDragStart = (item: EnrichedItem) => (evt: React.PointerEvent<SVGRectElement>) => {
@@ -295,6 +368,7 @@ const Timeline: React.FC<TimelineProps> = ({
         /* ignore */
       }
 
+      const baseY = Number.isFinite(item.y_m) ? item.y_m : (item.f + item.e) / 2;
       const state: DragState = {
         rowId: item.row_id,
         pointerId: evt.pointerId,
@@ -305,6 +379,7 @@ const Timeline: React.FC<TimelineProps> = ({
         baseEnd: item.endDate.getTime(),
         baseF: item.f,
         baseE: item.e,
+        baseY,
       };
       dragRef.current = state;
 
@@ -314,19 +389,19 @@ const Timeline: React.FC<TimelineProps> = ({
       };
       const upListener = (upEvt: PointerEvent) => {
         if (dragRef.current?.pointerId !== upEvt.pointerId) return;
-        onDragEnd(upEvt, state);
         try {
-          (evt.target as HTMLElement).releasePointerCapture(state.pointerId);
+          (evt.target as HTMLElement).releasePointerCapture(upEvt.pointerId);
         } catch (_e) {
-          /* no-op */
+          /* ignore */
         }
+        onDragEnd(upEvt, state);
         window.removeEventListener("pointermove", moveListener);
         window.removeEventListener("pointerup", upListener);
         window.removeEventListener("pointercancel", upListener);
       };
-      window.addEventListener("pointermove", moveListener, { passive: true });
-      window.addEventListener("pointerup", upListener, { passive: true });
-      window.addEventListener("pointercancel", upListener, { passive: true });
+      window.addEventListener("pointermove", moveListener);
+      window.addEventListener("pointerup", upListener);
+      window.addEventListener("pointercancel", upListener);
     };
 
     return (
@@ -334,7 +409,7 @@ const Timeline: React.FC<TimelineProps> = ({
         <div className="terminal-head">
           <div className="terminal-name">{meta.label}</div>
           <div className="terminal-meta">
-            <span>Berth step {meta.berthStep}m · Snap: 5min / 30m</span>
+            <span>Berth 자유 이동 · Snap 5min / 30m</span>
             <span className="total-count">{itemsForTerminal.length} vessels</span>
           </div>
         </div>
@@ -346,14 +421,7 @@ const Timeline: React.FC<TimelineProps> = ({
                 <stop offset="100%" stopColor="rgba(247,249,255,0.9)" />
               </linearGradient>
             </defs>
-            <rect
-              x={0}
-              y={0}
-              width={svgWidth}
-              height={svgHeight}
-              fill={`url(#bg-${terminal})`}
-              rx={8}
-            />
+            <rect x={0} y={0} width={svgWidth} height={svgHeight} fill={`url(#bg-${terminal})`} rx={8} />
 
             {ticks.map(({ x, text }, idx) => {
               const px = margin.left + (x - x0) * pxPerMs;
@@ -369,13 +437,7 @@ const Timeline: React.FC<TimelineProps> = ({
                     strokeWidth={isDay ? 1.2 : 0.8}
                   />
                   {idx % 2 === 0 && (
-                    <text
-                      x={px + 2}
-                      y={14}
-                      fontSize={11}
-                      fill="rgba(30,30,30,0.8)"
-                      textAnchor="start"
-                    >
+                    <text x={px + 2} y={14} fontSize={11} fill="rgba(30,30,30,0.8)" textAnchor="start">
                       {text}
                     </text>
                   )}
@@ -406,16 +468,16 @@ const Timeline: React.FC<TimelineProps> = ({
             )}
 
             {meta.berths.map((berth, idx) => {
-              const y0Band = toY(idx * meta.berthStep);
-              const y1Band = toY((idx + 1) * meta.berthStep);
-              const mid = (y0Band + y1Band) / 2;
+              const y0 = toY(idx * meta.berthStep);
+              const y1 = toY((idx + 1) * meta.berthStep);
+              const mid = (y0 + y1) / 2;
               return (
                 <g key={`${terminal}-berth-${berth}`}>
                   <rect
                     x={margin.left}
-                    y={y0Band}
+                    y={y0}
                     width={innerWidth}
-                    height={y1Band - y0Band}
+                    height={y1 - y0}
                     fill={idx % 2 === 0 ? "rgba(0,0,0,0.028)" : "rgba(0,0,0,0.018)"}
                     stroke="rgba(0,0,0,0.08)"
                     strokeWidth={0.4}
@@ -428,7 +490,7 @@ const Timeline: React.FC<TimelineProps> = ({
                     fontSize={12}
                     fill="rgba(35,35,35,0.8)"
                   >
-                    {berth}
+                    {meta.bandLabels[idx]}
                   </text>
                 </g>
               );
@@ -450,6 +512,7 @@ const Timeline: React.FC<TimelineProps> = ({
                 `Pilot: ${r.pilot ?? "-"}`,
                 `Start: ${r.startDate?.toLocaleString() ?? "-"}`,
                 `End: ${r.endDate?.toLocaleString() ?? "-"}`,
+                `Y: ${Number.isFinite(r.y_m) ? r.y_m.toFixed(0) : "-"}`,
                 `F: ${Number.isFinite(r.f) ? r.f.toFixed(0) : "-"}`,
                 `E: ${Number.isFinite(r.e) ? r.e.toFixed(0) : "-"}`,
                 r.note ? `Note: ${r.note}` : "",
@@ -527,21 +590,11 @@ const Timeline: React.FC<TimelineProps> = ({
         <div>
           <div className="title">React Drag & Drop Timeline</div>
           <div className="subtitle">
-            Drag horizontally (5 min snap) or vertically (30 m snap). Range stays fixed during drag,
-            and one payload is emitted once on drop.
+            Drag horizontally (5 min snap) or vertically (30 m snap). Berth updates automatically from the Y position.
           </div>
         </div>
         {legend}
       </div>
-      {booting && (
-        <div className="timeline-loading-banner" aria-live="polite">
-          <span className="timeline-spinner" />
-          <div>
-            <div className="timeline-loading-title">React 편집기를 준비하는 중입니다</div>
-            <div className="timeline-loading-sub">처음 1회 또는 데이터가 바뀐 직후에는 잠시 시간이 걸릴 수 있습니다.</div>
-          </div>
-        </div>
-      )}
       {renderTerminal("SND")}
       {renderTerminal("GAM")}
     </div>

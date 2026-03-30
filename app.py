@@ -504,6 +504,8 @@ def handle_sidebar_actions(ctrl: dict):
             st.session_state["pending_toast"] = {"msg": "저장되었습니다 (업로드 세트)", "icon": "💾"}
             st.success("저장 완료(업로드 세트 반영).")
             st.rerun()
+
+
 def _active_edit_df(source: str) -> pd.DataFrame:
     return st.session_state["edit_df_crawl"] if source == "crawl" else st.session_state["edit_df_upload"]
 
@@ -812,7 +814,6 @@ def render_original_compare(ctrl: dict):
     render_origin_view_static(curr_df, title_prefix=f"{label} 현재 {'편집본' if is_dirty else '저장본'}")
 
 
-
 def _render_with_optional_loading(message: str, show_loading: bool, fn, min_ms: int = 250):
     if show_loading:
         started = time.perf_counter()
@@ -823,7 +824,6 @@ def _render_with_optional_loading(message: str, show_loading: bool, fn, min_ms: 
                 time.sleep(min(remaining, 0.45))
     else:
         fn()
-
 
 
 def render_visualizations_and_validation(ctrl: dict):
@@ -853,7 +853,9 @@ def render_visualizations_and_validation(ctrl: dict):
             show_validation("정규화 검증", df_for_validation, visible=True, location=ctrl["val_location"])
 
     pending_viz_loading = bool(st.session_state.get("pending_viz_loading", False))
-    pending_viz_loading = pending_viz_loading or (time.perf_counter() < float(st.session_state.get("pending_viz_loading_until", 0.0) or 0.0))
+    pending_viz_loading = pending_viz_loading or (
+        time.perf_counter() < float(st.session_state.get("pending_viz_loading_until", 0.0) or 0.0)
+    )
 
     def _render_active_source(source: str):
         df_use = st.session_state["crawl_df"] if source == "crawl" else st.session_state["upload_df"]
@@ -945,7 +947,6 @@ def _render_raw_panel(source_key: str, label: str, editable: bool):
                 st.session_state[f"{key_prefix}_mode"] = True
                 st.session_state[f"{key_prefix}_buffer"] = df_raw.copy()
                 st.session_state[f"{key_prefix}_snapshot"] = df_raw.copy()
-                # 반대쪽 원본 편집 모드 강제 해제(동시 편집 방지)
                 other = "upload" if source_key == "crawl" else "crawl"
                 st.session_state[f"raw_{other}_mode"] = False
 
@@ -963,16 +964,13 @@ def _render_raw_panel(source_key: str, label: str, editable: bool):
                 st.info("원본 되돌리기 완료.")
 
             if save_btn:
-                # 원본 반영 후 정규화 갱신 · 그래프/편집버퍼 갱신
                 st.session_state[f"{source_key}_raw"] = edited.copy()
                 new_norm = ensure_row_id(normalize_df(st.session_state[f"{source_key}_raw"]))
                 st.session_state[f"{source_key}_df"] = new_norm.copy()
                 st.session_state[f"edit_df_{source_key}"] = new_norm.copy()
                 st.session_state[f"snapshot_{source_key}"] = new_norm.copy()
-                # 편집/되돌리기/로그 초기화
                 st.session_state[f"undo_df_{source_key}"] = None
                 st.session_state[f"logs_{source_key}"] = []
-                # 저장하면 시각화 켜고, 즉시 반영
                 st.session_state["show_viz"] = True
                 st.session_state[f"{key_prefix}_mode"] = False
                 st.success(f"{label} 원본 저장 완료(그래프 갱신).")
@@ -980,7 +978,6 @@ def _render_raw_panel(source_key: str, label: str, editable: bool):
         else:
             show_table(df_raw, f"🧾 {label} 원본")
     else:
-        # 읽기 전용 패널
         show_table(df_raw, f"🧾 {label} 원본 (읽기 전용)")
 
 
@@ -1022,7 +1019,6 @@ def render_raw_tables(ctrl: dict):
         _render_raw_panel("upload", "업로드", editable=True)
     else:
         st.info("좌측 사이드바에서 '조회하기' 또는 '불러오기'를 먼저 실행하세요.")
-
 
 
 # -----------------------------------------------------------------------------
@@ -1080,6 +1076,9 @@ def main():
     st.session_state["prev_use_react_drag"] = current_use_react_drag
     st.session_state["prev_active_source_for_react"] = current_active_source
 
+    _show_pending_toast()
+    _process_pending_action()
+
     # A) 조회/불러오기
     # 버튼 클릭은 pending_action으로 큐잉되어 여기서는 이미 처리된 상태입니다.
 
@@ -1103,20 +1102,10 @@ def main():
         dirty_label = "크롤링" if dirty_src == "crawl" else "업로드"
         st.warning(f"{dirty_label} 편집 버퍼에 저장 전 변경사항이 있습니다. 현재 그래프에는 반영되지만 원본 표에는 [저장] 후 동기화됩니다.")
 
-    # C) 메인 시각화 + 검증
     render_visualizations_and_validation(ctrl)
-
-    # D) 원본 테이블(좌/우 비교)
     render_raw_tables(ctrl)
-
-    # E) 최초 원본 대비 비교 (선택 데이터)
     render_original_compare(ctrl)
 
 
-# 진입점
 if __name__ == "__main__":
     main()
-
-
-
-
