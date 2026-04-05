@@ -415,22 +415,43 @@ def _bind_edit_context(source: str):
         st.session_state["edit_logs"] = st.session_state["logs_upload"]
 
 
+def _current_edit_context_dirty() -> bool:
+    """
+    현재 공용 편집 컨텍스트(edit_df vs orig_df_snapshot)가 저장 전 변경 상태인지 계산합니다.
+    - 로그 개수만 보면 '원위치로 다시 옮긴' 경우에도 dirty가 남을 수 있어
+      실제 DataFrame 비교를 우선 사용합니다.
+    """
+    edit_df = st.session_state.get("edit_df")
+    snap_df = st.session_state.get("orig_df_snapshot")
+    if edit_df is None or snap_df is None:
+        return False
+    try:
+        return not edit_df.equals(snap_df)
+    except Exception:
+        return bool(st.session_state.get("edit_logs"))
+
+
+
 def _persist_edit_context(source: str):
     """
     공용 편집 키를 다시 해당 세트로 복사해 둡니다.
     - 인터랙티브 시각화에서 사용자가 이동/드래그/키 조작을 하면 edit_df 값이 갱신되므로,
       그 결과를 세트별 키(edit_df_* / snapshot_* / undo_df_* / logs_*)로 되돌려 반영합니다.
+    - dirty flag도 여기서 함께 동기화해 Plotly 편집과 일반 편집 경로가 동일하게 동작하도록 합니다.
     """
+    is_dirty = _current_edit_context_dirty()
     if source == "crawl":
         st.session_state["edit_df_crawl"] = st.session_state["edit_df"].copy()
         st.session_state["snapshot_crawl"] = st.session_state["orig_df_snapshot"].copy()
         st.session_state["undo_df_crawl"] = st.session_state["undo_df"]
         st.session_state["logs_crawl"] = st.session_state["edit_logs"]
+        st.session_state["edit_dirty_crawl"] = is_dirty
     else:
         st.session_state["edit_df_upload"] = st.session_state["edit_df"].copy()
         st.session_state["snapshot_upload"] = st.session_state["orig_df_snapshot"].copy()
         st.session_state["undo_df_upload"] = st.session_state["undo_df"]
         st.session_state["logs_upload"] = st.session_state["edit_logs"]
+        st.session_state["edit_dirty_upload"] = is_dirty
 
 
 # -----------------------------------------------------------------------------

@@ -81,6 +81,19 @@ def _append_log(before, after):
     )
 
 
+
+def _buffer_is_dirty() -> bool:
+    """공용 편집 버퍼가 원본 스냅샷과 다른지 확인합니다."""
+    edit_df = st.session_state.get("edit_df")
+    snap_df = st.session_state.get("orig_df_snapshot")
+    if edit_df is None or snap_df is None:
+        return False
+    try:
+        return not edit_df.equals(snap_df)
+    except Exception:
+        return bool(st.session_state.get("edit_logs"))
+
+
 # ---------- 이동 스냅(5분/30m) ----------
 def _is_finite_num(x) -> bool:
     try:
@@ -426,18 +439,21 @@ def render_origin_view_drag(df_origin: pd.DataFrame):
             st.session_state["selected_row_id"] = int(rid)
 
         # source별 편집 상태/undo/log를 즉시 저장해야 rerun 이후에도 유지됨
+        dirty_now = _buffer_is_dirty()
         if src == "crawl":
             st.session_state["edit_df_crawl"] = st.session_state["edit_df"].copy()
             st.session_state["undo_df_crawl"] = (
                 None if st.session_state.get("undo_df") is None else st.session_state["undo_df"].copy()
             )
             st.session_state["logs_crawl"] = list(st.session_state.get("edit_logs", []))
+            st.session_state["edit_dirty_crawl"] = dirty_now
         else:
             st.session_state["edit_df_upload"] = st.session_state["edit_df"].copy()
             st.session_state["undo_df_upload"] = (
                 None if st.session_state.get("undo_df") is None else st.session_state["undo_df"].copy()
             )
             st.session_state["logs_upload"] = list(st.session_state.get("edit_logs", []))
+            st.session_state["edit_dirty_upload"] = dirty_now
         st.rerun()
 
     _ = validate_df(st.session_state["edit_df"])
