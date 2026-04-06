@@ -140,6 +140,15 @@ def _arm_react_boot(source: str, notice_seconds: float = 1.2):
     st.session_state[f"react_editor_boot_notice_until_{source}"] = started + notice_seconds
 
 
+def _arm_viz_loading(duration_seconds: float = 0.35):
+    now = time.perf_counter()
+    st.session_state["pending_viz_loading"] = True
+    st.session_state["pending_viz_loading_until"] = max(
+        float(st.session_state.get("pending_viz_loading_until", 0.0) or 0.0),
+        now + duration_seconds,
+    )
+
+
 def _process_pending_action():
     action = st.session_state.pop("pending_action", None)
     if not action:
@@ -978,9 +987,11 @@ def render_visualizations_and_validation(ctrl: dict):
 
             react_ready_key = f"react_editor_ready_{active_source}"
             react_notice_until = float(st.session_state.get(f"react_editor_boot_notice_until_{active_source}", 0.0) or 0.0)
-            react_is_ready = bool(st.session_state.get(react_ready_key, False))
-            if (not react_is_ready) or (time.perf_counter() < react_notice_until):
-                st.info("React 드래그 편집기를 여는 중입니다. 편집기가 준비되면 바로 드래그할 수 있습니다.")
+            react_booting = time.perf_counter() < react_notice_until
+            if react_booting and not pending_viz_loading:
+                st.info("React 드래그 편집기를 여는 중입니다. 준비되는 동안 로딩 안내를 먼저 보여드립니다.")
+            elif not react_booting and not bool(st.session_state.get(react_ready_key, False)):
+                st.session_state[react_ready_key] = True
 
             _render_active_source(active_source)
             return
@@ -1076,9 +1087,19 @@ def _render_raw_panel(source_key: str, label: str, editable: bool):
                 st.success(f"{label} 원본 저장 완료(그래프 갱신).")
                 st.rerun()
         else:
-            show_table(df_raw, f"🧾 {label} 원본")
+            show_table(
+                df_raw,
+                f"🧾 {label} 원본",
+                light_mode=bool(st.session_state.get("show_viz", False)),
+                key=f"raw-{source_key}",
+            )
     else:
-        show_table(df_raw, f"🧾 {label} 원본 (읽기 전용)")
+        show_table(
+            df_raw,
+            f"🧾 {label} 원본 (읽기 전용)",
+            light_mode=bool(st.session_state.get("show_viz", False)),
+            key=f"raw-{source_key}-readonly",
+        )
 
 
 def render_raw_tables(ctrl: dict):
@@ -1170,8 +1191,15 @@ def main():
     prev_active_source_for_react = st.session_state.get("prev_active_source_for_react", "crawl")
     current_use_react_drag = bool(ctrl.get("use_react_drag", False))
     current_active_source = ctrl.get("active_source", "crawl")
-    if current_use_react_drag and (not prev_use_react_drag or prev_active_source_for_react != current_active_source):
+    react_mode_changed = current_use_react_drag != prev_use_react_drag
+    react_source_changed = current_use_react_drag and (prev_active_source_for_react != current_active_source)
+
+    if current_use_react_drag and (react_mode_changed or react_source_changed):
         _arm_react_boot(current_active_source, notice_seconds=1.5)
+        if st.session_state.get("show_viz"):
+            _arm_viz_loading(0.45)
+    elif react_mode_changed and st.session_state.get("show_viz"):
+        _arm_viz_loading(0.25)
 
     st.session_state["prev_use_react_drag"] = current_use_react_drag
     st.session_state["prev_active_source_for_react"] = current_active_source

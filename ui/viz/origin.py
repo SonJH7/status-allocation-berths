@@ -289,7 +289,7 @@ def render_origin_view(df_origin: pd.DataFrame):
         events = plotly_events(
             fig,
             click_event=True,
-            hover_event=True,
+            hover_event=False,
             select_event=False,
             override_height=600,
             override_width=2400,
