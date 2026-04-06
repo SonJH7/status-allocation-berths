@@ -342,7 +342,7 @@ def build_sidebar():
             with col[0]:
                 run_crawl = st.button("조회하기 실행", use_container_width=True)
             with col[1]:
-                run_viz_crawl = st.button("시각화 하기", use_container_width=True)
+                run_viz_crawl = st.button("시각화 하기", use_container_width=True, key="crawl-viz")
 
         # ---------------------------------------------------------
         # B) 업로드
@@ -364,7 +364,7 @@ def build_sidebar():
                 with col1:
                     run_load = st.button("불러오기 실행", use_container_width=True)
                 with col2:
-                    run_viz = st.button("시각화 하기", use_container_width=True)
+                    run_viz = st.button("시각화 하기", use_container_width=True, key="upload-viz")
                 st.caption("추가 업로드가 없으면 아래 버튼을 클릭하세요.")
                 if st.button("닫기 ✕", use_container_width=True):
                     st.session_state["show_direct"] = False
